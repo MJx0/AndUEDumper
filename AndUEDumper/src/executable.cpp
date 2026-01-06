@@ -47,8 +47,9 @@
 #include "UE/UEGameProfiles/LineageW.hpp"
 #include "UE/UEGameProfiles/RLSideswipe.hpp"
 #include "UE/UEGameProfiles/PUBG.hpp"
+#include "UE/UEGameProfiles/SFG3.hpp"
 
-std::vector<IGameProfile *> UE_Games = {
+std::vector<IGameProfile*> UE_Games = {
     new PESProfile(),
     new DislyteProfile(),
     new MortalKombatProfile(),
@@ -78,13 +79,14 @@ std::vector<IGameProfile *> UE_Games = {
     new LineageWProfile(),
     new RLSideswipeProfile(),
     new PUBGProfile(),
+    new SFG3Profile(),
 };
 
 #define kUEDUMPER_VERSION "4.3.0"
 
 bool bNeededHelp = false;
 
-int main(int argc, char **args)
+int main(int argc, char** args)
 {
     setbuf(stdout, nullptr);
     setbuf(stderr, nullptr);
@@ -132,7 +134,7 @@ int main(int argc, char **args)
 
     if (sGamePackage.empty())
     {
-        std::sort(UE_Games.begin(), UE_Games.end(), [](const IGameProfile *a, const IGameProfile *b)
+        std::sort(UE_Games.begin(), UE_Games.end(), [](const IGameProfile* a, const IGameProfile* b)
         {
             return a->GetAppName() < b->GetAppName();
         });
@@ -142,10 +144,10 @@ int main(int argc, char **args)
         std::map<int, std::pair<int, int>> gameIndexMap;
         for (size_t i = 0; i < UE_Games.size(); i++)
         {
-            const auto &appIDs = UE_Games[i]->GetAppIDs();
+            const auto& appIDs = UE_Games[i]->GetAppIDs();
             for (size_t j = 0; j < appIDs.size(); j++)
             {
-                const char *nspace = gameIndex < 10 ? "  " : " ";
+                const char* nspace = gameIndex < 10 ? "  " : " ";
                 std::cout << "\t" << gameIndex << nspace << ": " << UE_Games[i]->GetAppName() << " | " << appIDs[j].c_str() << std::endl;
                 gameIndexMap[gameIndex] = {i, j};
                 gameIndex++;
@@ -252,7 +254,7 @@ int main(int argc, char **args)
         }
     });
 
-    uEDumper.setObjectsProgressCallback([](const SimpleProgressBar &progress)
+    uEDumper.setObjectsProgressCallback([](const SimpleProgressBar& progress)
     {
         static bool once = false;
         if (!once)
@@ -271,7 +273,7 @@ int main(int argc, char **args)
         }
     });
 
-    uEDumper.setDumpProgressCallback([](const SimpleProgressBar &progress)
+    uEDumper.setDumpProgressCallback([](const SimpleProgressBar& progress)
     {
         static bool once = false;
         if (!once)
@@ -294,9 +296,9 @@ int main(int argc, char **args)
     std::unordered_map<std::string, BufferFmt> dumpbuffersMap;
     auto dmpStart = std::chrono::steady_clock::now();
 
-    for (auto &it : UE_Games)
+    for (auto& it : UE_Games)
     {
-        for (auto &pkg : it->GetAppIDs())
+        for (auto& pkg : it->GetAppIDs())
         {
             if (sGamePackage != pkg)
                 continue;
@@ -313,7 +315,7 @@ int main(int argc, char **args)
                 LOGI("Dumping unreal lib from memory...");
                 std::string libDumpPath = KittyUtils::String::Fmt("%s/libUE_%p-%p.so", sDumpGameDir.c_str(), ue_elf.base(), ue_elf.end());
                 bool res = kMgr.dumpMemELF(ue_elf, libDumpPath);
-                LOGI("Dumping lib: %s.",  res ? "success" : "failed");
+                LOGI("Dumping lib: %s.", res ? "success" : "failed");
                 if (res)
                 {
                     LOGI("%s", libDumpPath.c_str());
@@ -348,7 +350,7 @@ done:
 
     LOGI("Saving Files...");
 
-    for (const auto &it : dumpbuffersMap)
+    for (const auto& it : dumpbuffersMap)
     {
         if (!it.first.empty())
         {

@@ -96,6 +96,7 @@ struct UE_Offsets
         uintptr_t PropertyFlags = 0;
         uintptr_t Offset_Internal = 0;
         uintptr_t Size = 0;
+        uintptr_t ArrayInner = 0;
     } UProperty;
     struct
     {
@@ -111,6 +112,7 @@ struct UE_Offsets
         uintptr_t PropertyFlags = 0;
         uintptr_t Offset_Internal = 0;
         uintptr_t Size = 0;
+        uintptr_t ArrayInner = 0;
     } FProperty;
 
     std::string ToString() const;
@@ -201,7 +203,7 @@ protected:
     uintptr_t ObjObjectsPtr;
     uintptr_t ObjObjects_Objects;
 
-    UE_Offsets *Offsets;
+    UE_Offsets* Offsets;
 
     std::function<std::string(int32_t)> pGetNameByID;
 
@@ -210,7 +212,7 @@ public:
     {
     }
 
-    UEVars(uintptr_t base, uintptr_t names, uintptr_t objectArray, uintptr_t objObjects, uintptr_t objects, UE_Offsets *offsets, const std::function<std::string(int32_t)> &pGetNameByID) : BaseAddress(base), NamesPtr(names), GUObjectsArrayPtr(objectArray), ObjObjectsPtr(objObjects), ObjObjects_Objects(objects), Offsets(offsets), pGetNameByID(pGetNameByID)
+    UEVars(uintptr_t base, uintptr_t names, uintptr_t objectArray, uintptr_t objObjects, uintptr_t objects, UE_Offsets* offsets, const std::function<std::string(int32_t)>& pGetNameByID) : BaseAddress(base), NamesPtr(names), GUObjectsArrayPtr(objectArray), ObjObjectsPtr(objObjects), ObjObjects_Objects(objects), Offsets(offsets), pGetNameByID(pGetNameByID)
     {
     }
 
@@ -220,7 +222,7 @@ public:
     uintptr_t GetObjObjectsPtr() const { return ObjObjectsPtr; };
     uintptr_t GetObjObjects_Objects() const { return ObjObjects_Objects; };
 
-    UE_Offsets *GetOffsets() const { return Offsets; };
+    UE_Offsets* GetOffsets() const { return Offsets; };
 
     std::string GetNameByID(int32_t id) const;
 

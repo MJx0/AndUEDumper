@@ -44,8 +44,9 @@
 #include "UE/UEGameProfiles/LineageW.hpp"
 #include "UE/UEGameProfiles/RLSideswipe.hpp"
 #include "UE/UEGameProfiles/PUBG.hpp"
+#include "UE/UEGameProfiles/SFG3.hpp"
 
-std::vector<IGameProfile *> UE_Games = {
+std::vector<IGameProfile*> UE_Games = {
     new PESProfile(),
     new DislyteProfile(),
     new MortalKombatProfile(),
@@ -75,6 +76,7 @@ std::vector<IGameProfile *> UE_Games = {
     new LineageWProfile(),
     new RLSideswipeProfile(),
     new PUBGProfile(),
+    new SFG3Profile(),
 };
 
 #define kUEDUMPER_VERSION "4.3.0"
@@ -170,7 +172,7 @@ void dump_thread(bool bDumpLib)
         }
     });
 
-    uEDumper.setObjectsProgressCallback([](const SimpleProgressBar &)
+    uEDumper.setObjectsProgressCallback([](const SimpleProgressBar&)
     {
         static bool once = false;
         if (!once)
@@ -180,7 +182,7 @@ void dump_thread(bool bDumpLib)
         };
     });
 
-    uEDumper.setDumpProgressCallback([](const SimpleProgressBar &)
+    uEDumper.setDumpProgressCallback([](const SimpleProgressBar&)
     {
         static bool once = false;
         if (!once)
@@ -194,9 +196,9 @@ void dump_thread(bool bDumpLib)
     std::unordered_map<std::string, BufferFmt> dumpbuffersMap;
     auto dmpStart = std::chrono::steady_clock::now();
 
-    for (auto &it : UE_Games)
+    for (auto& it : UE_Games)
     {
-        for (auto &pkg : it->GetAppIDs())
+        for (auto& pkg : it->GetAppIDs())
         {
             if (sGamePackage != pkg)
                 continue;
@@ -213,7 +215,7 @@ void dump_thread(bool bDumpLib)
                 LOGI("Dumping unreal lib from memory...");
                 std::string libDumpPath = KittyUtils::String::Fmt("%s/libUE_%p-%p.so", sDumpGameDir.c_str(), ue_elf.base(), ue_elf.end());
                 bool res = kMgr.dumpMemELF(ue_elf, libDumpPath);
-                LOGI("Dumping lib: %s.",  res ? "success" : "failed");
+                LOGI("Dumping lib: %s.", res ? "success" : "failed");
                 if (res)
                 {
                     LOGI("%s", libDumpPath.c_str());
@@ -248,7 +250,7 @@ done:
 
     LOGI("Saving Files...");
 
-    for (const auto &it : dumpbuffersMap)
+    for (const auto& it : dumpbuffersMap)
     {
         if (!it.first.empty())
         {
