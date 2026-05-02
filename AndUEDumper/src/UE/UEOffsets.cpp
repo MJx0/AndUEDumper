@@ -139,6 +139,15 @@ std::string UE_Offsets::ToString() const
             kOUT_NEWLINE();
         }
 
+        kOUT_NS_BEGIN(UClass);
+        {
+            kOUT_NS_MEMBER_P(UClass, CastFlags);
+            kOUT_NS_MEMBER_P(UClass, DefaultObject);
+            kOUT_NS_END();
+            kOUT_NEWLINE();
+            kOUT_NEWLINE();
+        }
+
         kOUT_NS_BEGIN(UFunction);
         {
             kOUT_NS_MEMBER_P(UFunction, EFunctionFlags);
@@ -440,6 +449,12 @@ namespace UE_DefaultOffsets
             offsets.UStruct.ChildProperties = offsets.UStruct.Children + sizeof(void *);  // FField*
             offsets.UStruct.PropertiesSize = offsets.UStruct.ChildProperties + sizeof(void *);
 
+            // UE 4.25-5.x default UClass layout (Dumper-7 reference): UStruct
+            // (~0xB0) + 0x28 pad → CastFlags @ 0xD8, then 0x58 pad →
+            // DefaultObject @ 0x138. Per-game profile may override.
+            offsets.UClass.CastFlags = 0xD8;
+            offsets.UClass.DefaultObject = 0x138;
+
             offsets.UFunction.EFunctionFlags = offsets.UStruct.PropertiesSize + (sizeof(int32_t) * 2) + ((sizeof(void *) + sizeof(int32_t) * 2) * 2) + (sizeof(void *) * 6);
             offsets.UFunction.NumParams = offsets.UFunction.EFunctionFlags + sizeof(int32_t);
             offsets.UFunction.ParamSize = offsets.UFunction.NumParams + sizeof(int16_t);
@@ -531,6 +546,10 @@ namespace UE_DefaultOffsets
             offsets.UStruct.Children = offsets.UStruct.SuperStruct + sizeof(void *);      // UField*
             offsets.UStruct.ChildProperties = offsets.UStruct.Children + sizeof(void *);  // FField*
             offsets.UStruct.PropertiesSize = offsets.UStruct.ChildProperties + sizeof(void *);
+
+            // UE5 default UClass layout (matches UE 4.25-5.x Dumper-7 reference).
+            offsets.UClass.CastFlags = 0xD8;
+            offsets.UClass.DefaultObject = 0x138;
 
             offsets.UFunction.EFunctionFlags = offsets.UStruct.PropertiesSize + (sizeof(int32_t) * 2) + ((sizeof(void *) + sizeof(int32_t) * 2) * 2) + (sizeof(void *) * 6);
             offsets.UFunction.NumParams = offsets.UFunction.EFunctionFlags + sizeof(int32_t);

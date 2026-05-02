@@ -82,6 +82,16 @@ struct UE_Offsets
         uintptr_t ChildProperties = 0;
         uintptr_t PropertiesSize = 0;
     } UStruct;
+    // UClass adds its own per-game members on top of UStruct. CastFlags
+    // and DefaultObject are needed to type the dumped UClass — without
+    // them the augmenter falls back to opaque Pad_0xN[] for those slots
+    // and helpers like HasTypeFlag / GetDefaultObj have nothing to read.
+    // Modern UE (4.25 - 5.x) defaults: CastFlags @ 0xD8, DefaultObject @ 0x138.
+    struct
+    {
+        uintptr_t CastFlags = 0;
+        uintptr_t DefaultObject = 0;
+    } UClass;
     struct
     {
         uintptr_t EFunctionFlags = 0;
