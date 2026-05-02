@@ -1009,6 +1009,142 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
                     c.CppNameOnly, c.Name);
             }
         }
+
+        // ---- Phase 1.6c: math operators on well-known math structs ----
+        //
+        // Inject member operators (+ - * / +=  -= *= /= == != unary-)
+        // and helper methods (Length / LengthSquared / Dot / Cross /
+        // Distance / IsNearlyZero / GetSafeNormal) on the canonical UE
+        // math types. All emitted member-scoped (T::operator+, ...) so
+        // they don't leak into namespace SDK and can't conflict with
+        // anything else the user pulls in. Not gated by a macro — the
+        // imgui IMGUI_DEFINE_MATH_OPERATORS pattern guards free-function
+        // operators, which is irrelevant once everything is on the type.
+        //
+        // Component-wise operations + the Length family assume the
+        // canonical UE member layout (X/Y/Z, Pitch/Yaw/Roll, R/G/B/A);
+        // games that re-shape these structs would need to override.
+        for (auto &p : _sdkProcessed)
+        {
+            for (auto &s : p.Structures)
+            {
+                const char* mathOps = nullptr;
+                if (s.CppNameOnly == "FVector")
+                {
+                    mathOps = R"FVOPS(
+	// === Math helpers ===
+	FVector  operator+(const FVector& o) const { return {X + o.X, Y + o.Y, Z + o.Z}; }
+	FVector  operator-(const FVector& o) const { return {X - o.X, Y - o.Y, Z - o.Z}; }
+	FVector  operator*(const FVector& o) const { return {X * o.X, Y * o.Y, Z * o.Z}; }
+	FVector  operator/(const FVector& o) const { return {X / o.X, Y / o.Y, Z / o.Z}; }
+	FVector  operator*(float s)          const { return {X * s, Y * s, Z * s}; }
+	FVector  operator/(float s)          const { return {X / s, Y / s, Z / s}; }
+	FVector  operator-()                 const { return {-X, -Y, -Z}; }
+	FVector& operator+=(const FVector& o)      { X += o.X; Y += o.Y; Z += o.Z; return *this; }
+	FVector& operator-=(const FVector& o)      { X -= o.X; Y -= o.Y; Z -= o.Z; return *this; }
+	FVector& operator*=(float s)               { X *= s;   Y *= s;   Z *= s;   return *this; }
+	FVector& operator/=(float s)               { X /= s;   Y /= s;   Z /= s;   return *this; }
+	bool     operator==(const FVector& o) const{ return X == o.X && Y == o.Y && Z == o.Z; }
+	bool     operator!=(const FVector& o) const{ return !(*this == o); }
+	float    LengthSquared() const             { return X*X + Y*Y + Z*Z; }
+	float    Length()        const             { return std::sqrt(LengthSquared()); }
+	float    Dot(const FVector& o)  const      { return X*o.X + Y*o.Y + Z*o.Z; }
+	FVector  Cross(const FVector& o) const     { return {Y*o.Z - Z*o.Y, Z*o.X - X*o.Z, X*o.Y - Y*o.X}; }
+	float    Distance(const FVector& o) const  { return (*this - o).Length(); }
+	bool     IsNearlyZero(float t = 1e-4f) const { return std::abs(X) <= t && std::abs(Y) <= t && std::abs(Z) <= t; }
+	FVector  GetSafeNormal(float t = 1e-4f) const { float l = Length(); return l > t ? FVector{X/l, Y/l, Z/l} : FVector{0,0,0}; }
+)FVOPS";
+                }
+                else if (s.CppNameOnly == "FVector2D")
+                {
+                    mathOps = R"FV2OPS(
+	// === Math helpers ===
+	FVector2D  operator+(const FVector2D& o) const { return {X + o.X, Y + o.Y}; }
+	FVector2D  operator-(const FVector2D& o) const { return {X - o.X, Y - o.Y}; }
+	FVector2D  operator*(const FVector2D& o) const { return {X * o.X, Y * o.Y}; }
+	FVector2D  operator/(const FVector2D& o) const { return {X / o.X, Y / o.Y}; }
+	FVector2D  operator*(float s)            const { return {X * s, Y * s}; }
+	FVector2D  operator/(float s)            const { return {X / s, Y / s}; }
+	FVector2D  operator-()                   const { return {-X, -Y}; }
+	FVector2D& operator+=(const FVector2D& o)      { X += o.X; Y += o.Y; return *this; }
+	FVector2D& operator-=(const FVector2D& o)      { X -= o.X; Y -= o.Y; return *this; }
+	FVector2D& operator*=(float s)                 { X *= s; Y *= s; return *this; }
+	FVector2D& operator/=(float s)                 { X /= s; Y /= s; return *this; }
+	bool       operator==(const FVector2D& o) const{ return X == o.X && Y == o.Y; }
+	bool       operator!=(const FVector2D& o) const{ return !(*this == o); }
+	float      LengthSquared() const               { return X*X + Y*Y; }
+	float      Length()        const               { return std::sqrt(LengthSquared()); }
+	float      Dot(const FVector2D& o) const       { return X*o.X + Y*o.Y; }
+	float      Distance(const FVector2D& o) const  { return (*this - o).Length(); }
+	bool       IsNearlyZero(float t = 1e-4f) const { return std::abs(X) <= t && std::abs(Y) <= t; }
+	FVector2D  GetSafeNormal(float t = 1e-4f) const { float l = Length(); return l > t ? FVector2D{X/l, Y/l} : FVector2D{0,0}; }
+)FV2OPS";
+                }
+                else if (s.CppNameOnly == "FVector4")
+                {
+                    mathOps = R"FV4OPS(
+	// === Math helpers ===
+	FVector4  operator+(const FVector4& o) const { return {X + o.X, Y + o.Y, Z + o.Z, W + o.W}; }
+	FVector4  operator-(const FVector4& o) const { return {X - o.X, Y - o.Y, Z - o.Z, W - o.W}; }
+	FVector4  operator*(float s)           const { return {X * s, Y * s, Z * s, W * s}; }
+	FVector4  operator/(float s)           const { return {X / s, Y / s, Z / s, W / s}; }
+	FVector4  operator-()                  const { return {-X, -Y, -Z, -W}; }
+	FVector4& operator+=(const FVector4& o)      { X += o.X; Y += o.Y; Z += o.Z; W += o.W; return *this; }
+	FVector4& operator-=(const FVector4& o)      { X -= o.X; Y -= o.Y; Z -= o.Z; W -= o.W; return *this; }
+	FVector4& operator*=(float s)                { X *= s; Y *= s; Z *= s; W *= s; return *this; }
+	FVector4& operator/=(float s)                { X /= s; Y /= s; Z /= s; W /= s; return *this; }
+	bool      operator==(const FVector4& o) const{ return X == o.X && Y == o.Y && Z == o.Z && W == o.W; }
+	bool      operator!=(const FVector4& o) const{ return !(*this == o); }
+	float     LengthSquared() const              { return X*X + Y*Y + Z*Z + W*W; }
+	float     Length()        const              { return std::sqrt(LengthSquared()); }
+	float     Dot(const FVector4& o) const       { return X*o.X + Y*o.Y + Z*o.Z + W*o.W; }
+	bool      IsNearlyZero(float t = 1e-4f) const{ return std::abs(X) <= t && std::abs(Y) <= t && std::abs(Z) <= t && std::abs(W) <= t; }
+)FV4OPS";
+                }
+                else if (s.CppNameOnly == "FRotator")
+                {
+                    mathOps = R"FROPS(
+	// === Math helpers (component-wise; angles, no Length-style scalar) ===
+	FRotator  operator+(const FRotator& o) const { return {Pitch + o.Pitch, Yaw + o.Yaw, Roll + o.Roll}; }
+	FRotator  operator-(const FRotator& o) const { return {Pitch - o.Pitch, Yaw - o.Yaw, Roll - o.Roll}; }
+	FRotator  operator*(float s)           const { return {Pitch * s, Yaw * s, Roll * s}; }
+	FRotator  operator/(float s)           const { return {Pitch / s, Yaw / s, Roll / s}; }
+	FRotator  operator-()                  const { return {-Pitch, -Yaw, -Roll}; }
+	FRotator& operator+=(const FRotator& o)      { Pitch += o.Pitch; Yaw += o.Yaw; Roll += o.Roll; return *this; }
+	FRotator& operator-=(const FRotator& o)      { Pitch -= o.Pitch; Yaw -= o.Yaw; Roll -= o.Roll; return *this; }
+	FRotator& operator*=(float s)                { Pitch *= s; Yaw *= s; Roll *= s; return *this; }
+	FRotator& operator/=(float s)                { Pitch /= s; Yaw /= s; Roll /= s; return *this; }
+	bool      operator==(const FRotator& o) const{ return Pitch == o.Pitch && Yaw == o.Yaw && Roll == o.Roll; }
+	bool      operator!=(const FRotator& o) const{ return !(*this == o); }
+	bool      IsNearlyZero(float t = 1e-4f) const{ return std::abs(Pitch) <= t && std::abs(Yaw) <= t && std::abs(Roll) <= t; }
+)FROPS";
+                }
+                else if (s.CppNameOnly == "FLinearColor")
+                {
+                    mathOps = R"FLCOPS(
+	// === Math helpers (component-wise; colors, no Length / Distance) ===
+	FLinearColor  operator+(const FLinearColor& o) const { return {R + o.R, G + o.G, B + o.B, A + o.A}; }
+	FLinearColor  operator-(const FLinearColor& o) const { return {R - o.R, G - o.G, B - o.B, A - o.A}; }
+	FLinearColor  operator*(const FLinearColor& o) const { return {R * o.R, G * o.G, B * o.B, A * o.A}; }
+	FLinearColor  operator*(float s)               const { return {R * s, G * s, B * s, A * s}; }
+	FLinearColor  operator/(float s)               const { return {R / s, G / s, B / s, A / s}; }
+	FLinearColor& operator+=(const FLinearColor& o)      { R += o.R; G += o.G; B += o.B; A += o.A; return *this; }
+	FLinearColor& operator-=(const FLinearColor& o)      { R -= o.R; G -= o.G; B -= o.B; A -= o.A; return *this; }
+	FLinearColor& operator*=(float s)                    { R *= s; G *= s; B *= s; A *= s; return *this; }
+	FLinearColor& operator/=(float s)                    { R /= s; G /= s; B /= s; A /= s; return *this; }
+	bool          operator==(const FLinearColor& o) const{ return R == o.R && G == o.G && B == o.B && A == o.A; }
+	bool          operator!=(const FLinearColor& o) const{ return !(*this == o); }
+)FLCOPS";
+                }
+
+                if (mathOps)
+                {
+                    if (!s.ExtraDecls.empty())
+                        s.ExtraDecls += "\n";
+                    s.ExtraDecls += mathOps;
+                }
+            }
+        }
     }
 
     // Drop packages that ended up with nothing to emit
@@ -1627,7 +1763,10 @@ static void EmitSDKCoreFiles(
         auto &buf = outBuffersMap[prefix + "CoreUObject_structs.hpp"];
         buf.append("#pragma once\n\n");
         buf.append("#include \"Basic.h\"\n");
-        buf.append("#include \"UnrealContainers.h\"\n\n");
+        buf.append("#include \"UnrealContainers.h\"\n");
+        // <cmath> for the math-helper ops (Length / Dot / Normalize ...)
+        // injected on FVector / FVector2D / FRotator / etc.
+        buf.append("#include <cmath>\n\n");
 
         // DEFINE_UE_CLASS_HELPERS macro — used by every dumped Class via
         // Phase 1.6b. Macros are global; emitting once here covers both
@@ -1710,7 +1849,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
     if (_sdkProcessed.empty())
     {
         aioBufferFmt.append("#pragma once\n\n");
-        aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n\n");
+        aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n#include <cmath>\n\n");
         aioBufferFmt.append("{}\n", ApplyCasePreservingDefine(kAIOPreamble, casePreserving));
         logsBufferFmt.append("Saved packages: 0\nSaved classes: 0\nSaved structs: 0\nSaved enums: 0\n");
         if (!_sdkPackagesUnsaved.empty())
@@ -1724,7 +1863,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
     }
 
     aioBufferFmt.append("#pragma once\n\n");
-    aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n\n");
+    aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n#include <cmath>\n\n");
     aioBufferFmt.append("{}\n", ApplyCasePreservingDefine(kAIOPreamble, casePreserving));
 
     aioBufferFmt.append("// === Forward declarations ===\n\n");
