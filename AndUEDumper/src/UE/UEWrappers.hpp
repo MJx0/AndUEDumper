@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -277,13 +278,21 @@ public:
 
     bool IsObject(const UE_UObject &address) const;
 
+    static std::string ToLower(const std::string &s)
+    {
+        std::string r = s;
+        std::transform(r.begin(), r.end(), r.begin(), ::tolower);
+        return r;
+    }
+
     template <typename T = UE_UObject>
     T FindObject(const std::string &fullName) const
     {
+        std::string lowerFullName = ToLower(fullName);
         for (int32_t i = 0; i < GetNumElements(); i++)
         {
             UE_UObject object = GetObjectPtr(i);
-            if (object && object.GetFullName() == fullName)
+            if (object && ToLower(object.GetFullName()) == lowerFullName)
             {
                 return object.Cast<T>();
             }
@@ -294,10 +303,11 @@ public:
     template <typename T = UE_UObject>
     T FindObjectFast(const std::string &name) const
     {
+        std::string lowerName = ToLower(name);
         for (int32_t i = 0; i < GetNumElements(); i++)
         {
             UE_UObject object = GetObjectPtr(i);
-            if (object && object.GetName() == name)
+            if (object && ToLower(object.GetName()) == lowerName)
             {
                 return object.Cast<T>();
             }
@@ -308,10 +318,12 @@ public:
     template <typename T = UE_UObject>
     T FindObjectFastInOuter(const std::string &name, const std::string &outer)
     {
+        std::string lowerName = ToLower(name);
+        std::string lowerOuter = ToLower(outer);
         for (int32_t i = 0; i < GetNumElements(); i++)
         {
             UE_UObject object = GetObjectPtr(i);
-            if (object.GetName() == name && object.GetOuter().GetName() == outer)
+            if (ToLower(object.GetName()) == lowerName && ToLower(object.GetOuter().GetName()) == lowerOuter)
             {
                 return object.Cast<T>();
             }
