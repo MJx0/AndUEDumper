@@ -518,6 +518,12 @@ void UE_UPackage::AppendStructsToBuffer(std::vector<Struct> &arr, BufferFmt *pBu
                 pBufFmt->append("\n\n\t// Object: {}\n\t// Flags: [{}]\n\t// Offset: {}\n\t// Params: [ Num({}) Size(0x{:X}) ]\n\t{}({});", f.FullName, f.Flags, funcOffset, f.NumParams, f.ParamSize, f.CppName, f.Params);
             }
         }
+        if (!s.ExtraDecls.empty())
+        {
+            if (s.Members.size() || s.Functions.size())
+                pBufFmt->append("\n");
+            pBufFmt->append("{}", s.ExtraDecls);
+        }
         pBufFmt->append("\n}};\n\n");
     }
 }

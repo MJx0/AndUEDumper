@@ -50,6 +50,10 @@ public:
         // Names of other dumped types referenced via pointer/template
         // wrappers — only forward declarations are required to compile.
         std::set<std::string> ForwardDeps;
+        // Optional extra C++ source appended verbatim inside the struct body
+        // (after Members and Functions). Used by the AIOCore augmenter to
+        // inject inline method declarations on core reflection types.
+        std::string ExtraDecls;
     };
     struct Enum
     {

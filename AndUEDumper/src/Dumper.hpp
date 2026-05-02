@@ -25,6 +25,10 @@ class UEDumper
     ProgressCallback _objectsProgressCallback;
     ProgressCallback _dumpProgressCallback;
 
+    // Discovered by DumpOffsetsInfo and consumed by DumpAIOHeader to bake
+    // the per-game ProcessEvent vtable slot into the AIOCore helper block.
+    int _processEventIndex = 0;
+
 public:
     UEDumper() : _profile(nullptr), _dumpExeInfoNotify(nullptr), _dumpNamesInfoNotify(nullptr), _dumpObjectsInfoNotify(nullptr), _objectsProgressCallback(nullptr), _dumpProgressCallback(nullptr) {}
 

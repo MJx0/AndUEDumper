@@ -264,6 +264,8 @@ void UEDumper::DumpOffsetsInfo(BufferFmt &logsBufferFmt, BufferFmt &offsetsBuffe
     uEPointers.ProcessEvent = ProcessEventPtr ? (ProcessEventPtr - baseAddr) : 0;
     uEPointers.ProcessEventIndex = ProcessEventIndex;
 
+    _processEventIndex = ProcessEventIndex;
+
     offsetsBufferFmt.append("#pragma once\n\n#include <cstdint>\n\n\n");
     offsetsBufferFmt.append("{}\n\n{}", _profile->GetOffsets()->ToString(), uEPointers.ToString());
 
@@ -628,6 +630,163 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
         }
     }
 
+    // ---- Phase 1.6: augment well-known core reflection classes ------------
+    //
+    // Property-walker output for UObject / UField / UStruct / UEnum /
+    // UFunction is opaque (`Pad_0xN[0xM]`) because their layouts aren't
+    // expressible through the FProperty graph. The per-game offsets of
+    // their internal slots are already in `UE_Offsets`, so here we stitch
+    // typed members back in, replacing those padding regions.
+    //
+    // Net effect: `Actor->ClassPrivate`, `Func->Func`, `Cls->SuperStruct`
+    // etc. become first-class typed accesses rather than raw byte
+    // arithmetic. For UObject we also inject a `ProcessEvent` declaration;
+    // the inline body is emitted at the very end of the header (Phase 5c)
+    // so it can dispatch through UFunction once the type graph is laid out.
+    //
+    // Runs after Phase 1.5 (so we don't augment structs that are about to
+    // be dropped as duplicates) but before Phase 3 (so the new typed
+    // members feed into the dependency graph).
+    {
+        const UE_Offsets &offs = *_profile->GetUEVars()->GetOffsets();
+        const uint32_t fnameSize = static_cast<uint32_t>(offs.FName.Size ? offs.FName.Size : 8);
+
+        struct KnownField
+        {
+            uintptr_t Offset;
+            uint32_t  Size;
+            std::string Type;
+            std::string Name;
+        };
+
+        auto fieldsFor = [&](const std::string &cppName) -> std::vector<KnownField>
+        {
+            std::vector<KnownField> v;
+            auto add = [&](uintptr_t off, uint32_t size, std::string type, std::string name,
+                           bool allowZeroOffset = false)
+            {
+                // Reflected offsets that came back as 0 mean "not discovered" —
+                // skip those slots so we don't smash the start of the struct.
+                if (off == 0 && !allowZeroOffset) return;
+                v.push_back({off, size, std::move(type), std::move(name)});
+            };
+
+            if (cppName == "UObject")
+            {
+                // VTable is synthetic: every UObject starts with one but the
+                // dumper has no offset for it. Force-emit at 0.
+                add(0,                          8, "void**",           "VTable", true);
+                add(offs.UObject.ClassPrivate,  8, "struct UClass*",   "ClassPrivate");
+                add(offs.UObject.OuterPrivate,  8, "struct UObject*",  "OuterPrivate");
+                add(offs.UObject.ObjectFlags,   4, "uint32_t",         "ObjectFlags");
+                add(offs.UObject.NamePrivate,   fnameSize, "FName",    "NamePrivate");
+                add(offs.UObject.InternalIndex, 4, "int32_t",          "InternalIndex");
+            }
+            else if (cppName == "UField")
+            {
+                add(offs.UField.Next, 8, "struct UField*", "Next");
+            }
+            else if (cppName == "UStruct")
+            {
+                add(offs.UStruct.PropertiesSize,  4, "int32_t",         "PropertiesSize");
+                add(offs.UStruct.SuperStruct,     8, "struct UStruct*", "SuperStruct");
+                add(offs.UStruct.Children,        8, "struct UField*",  "Children");
+                add(offs.UStruct.ChildProperties, 8, "void*",           "ChildProperties");
+            }
+            else if (cppName == "UEnum")
+            {
+                add(offs.UEnum.Names, 16, "TArray<TPair<FName, int64_t>>", "Names");
+            }
+            else if (cppName == "UFunction")
+            {
+                add(offs.UFunction.NumParams,      1, "uint8_t",  "NumParams");
+                add(offs.UFunction.ParamSize,      2, "uint16_t", "ParamSize");
+                add(offs.UFunction.EFunctionFlags, 4, "uint32_t", "EFunctionFlags");
+                add(offs.UFunction.Func,           8, "void*",    "Func");
+            }
+            return v;
+        };
+
+        auto augment = [&](UE_UPackage::Struct &s)
+        {
+            auto fields = fieldsFor(s.CppNameOnly);
+            if (fields.empty()) return;
+
+            std::sort(fields.begin(), fields.end(),
+                      [](const KnownField &a, const KnownField &b) { return a.Offset < b.Offset; });
+
+            // Drop fields that fall in the inherited range (already provided
+            // by the parent struct) or extend past this struct's reflected
+            // size. Without this guard a malformed offset (e.g. 0 reported
+            // for a slot that's actually inside the parent) would smash the
+            // member layout.
+            fields.erase(
+                std::remove_if(fields.begin(), fields.end(),
+                               [&](const KnownField &f) {
+                                   return f.Offset < s.Inherited
+                                       || f.Offset + f.Size > s.Size;
+                               }),
+                fields.end());
+            if (fields.empty()) return;
+
+            std::vector<UE_UPackage::Member> rebuilt;
+            rebuilt.reserve(fields.size() * 2 + 1);
+
+            uint32_t cursor = s.Inherited;
+            for (const auto &f : fields)
+            {
+                if (f.Offset > cursor)
+                {
+                    UE_UPackage::Member pad;
+                    pad.Type   = "uint8_t";
+                    pad.Name   = fmt::format("Pad_0x{:X}[0x{:X}]", cursor, f.Offset - cursor);
+                    pad.Offset = cursor;
+                    pad.Size   = f.Offset - cursor;
+                    rebuilt.push_back(std::move(pad));
+                }
+                UE_UPackage::Member m;
+                m.Type   = f.Type;
+                m.Name   = f.Name;
+                m.Offset = static_cast<uint32_t>(f.Offset);
+                m.Size   = f.Size;
+                UE_UPackage::ExtractTypeDeps(m.Type, s.FullDeps, s.ForwardDeps);
+                rebuilt.push_back(std::move(m));
+                cursor = static_cast<uint32_t>(f.Offset + f.Size);
+            }
+            if (cursor < s.Size)
+            {
+                UE_UPackage::Member pad;
+                pad.Type   = "uint8_t";
+                pad.Name   = fmt::format("Pad_0x{:X}[0x{:X}]", cursor, s.Size - cursor);
+                pad.Offset = cursor;
+                pad.Size   = s.Size - cursor;
+                rebuilt.push_back(std::move(pad));
+            }
+
+            // ExtractTypeDeps may have re-introduced self as a dep (e.g.
+            // UObject's OuterPrivate references UObject); strip it.
+            s.FullDeps.erase(s.CppNameOnly);
+            s.ForwardDeps.erase(s.CppNameOnly);
+
+            s.Members = std::move(rebuilt);
+
+            if (s.CppNameOnly == "UObject")
+            {
+                // Implementation lives in the AIOCore block at the end of
+                // the header so it can dispatch through UFunction.
+                s.ExtraDecls =
+                    "\t// === AIO Core helpers (inline body at end of header) ===\n"
+                    "\tvoid ProcessEvent(struct UFunction* Function, void* Parms) const;\n";
+            }
+        };
+
+        for (auto &p : processed)
+        {
+            for (auto &c : p.Classes)    augment(c);
+            for (auto &s : p.Structures) augment(s); // harmless on non-targets
+        }
+    }
+
     // Drop packages that ended up with nothing to emit
     std::string packages_unsaved;
     {
@@ -895,6 +1054,39 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
             }
         }
     }
+
+    // ---- Phase 5c: AIOCore inline helpers ------------------------------------
+    //
+    // Goes at the very end so it can dispatch through UFunction (defined
+    // mid-file once CoreUObject lands). The augmenter (Phase 1.6) already
+    // injected matching declarations on UObject; this block supplies the
+    // inline bodies that pull the per-game ProcessEvent vtable slot out of
+    // the dump.
+    aioBufferFmt.append("\n// === AIO Core Helpers ===\n");
+    aioBufferFmt.append("// Generated runtime glue tying the dumped UE reflection layout to\n");
+    aioBufferFmt.append("// per-game offsets discovered during the dump. The ProcessEvent\n");
+    aioBufferFmt.append("// vtable slot baked in here lets `Obj->ProcessEvent(Func, &Parms)`\n");
+    aioBufferFmt.append("// dispatch correctly without a separate runtime initialiser.\n\n");
+    aioBufferFmt.append("#ifndef AIOHeader_CORE_HELPERS_DEFINED\n");
+    aioBufferFmt.append("#define AIOHeader_CORE_HELPERS_DEFINED\n\n");
+    aioBufferFmt.append("namespace AIOCore\n{{\n");
+    aioBufferFmt.append("    // Vtable slot of UObject::ProcessEvent in the target image.\n");
+    aioBufferFmt.append("    // Discovered during dumping; override by #define-ing\n");
+    aioBufferFmt.append("    // AIOCORE_PROCESS_EVENT_INDEX before #include if you need to\n");
+    aioBufferFmt.append("    // swap it for a custom build.\n");
+    aioBufferFmt.append("    #ifdef AIOCORE_PROCESS_EVENT_INDEX\n");
+    aioBufferFmt.append("    constexpr int kProcessEventIndex = AIOCORE_PROCESS_EVENT_INDEX;\n");
+    aioBufferFmt.append("    #else\n");
+    aioBufferFmt.append("    constexpr int kProcessEventIndex = {};\n", _processEventIndex);
+    aioBufferFmt.append("    #endif\n");
+    aioBufferFmt.append("}}\n\n");
+    aioBufferFmt.append("inline void UObject::ProcessEvent(struct UFunction* Function, void* Parms) const\n");
+    aioBufferFmt.append("{{\n");
+    aioBufferFmt.append("    using FN = void(*)(const UObject*, struct UFunction*, void*);\n");
+    aioBufferFmt.append("    auto vtbl = *reinterpret_cast<void* const* const*>(this);\n");
+    aioBufferFmt.append("    reinterpret_cast<FN>(vtbl[AIOCore::kProcessEventIndex])(this, Function, Parms);\n");
+    aioBufferFmt.append("}}\n\n");
+    aioBufferFmt.append("#endif // AIOHeader_CORE_HELPERS_DEFINED\n");
 
     logsBufferFmt.append("Saved packages: {}\nSaved classes: {}\nSaved structs: {}\nSaved enums: {}\n", packages_saved, classes_saved, structs_saved, enums_saved);
 
