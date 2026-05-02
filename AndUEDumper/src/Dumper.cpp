@@ -378,7 +378,19 @@ class FName final
 public:
     static inline std::function<std::string(int32_t)> s_NameResolver;
 
-    int32_t ComparisonIndex;
+// `bWITH_CASE_PRESERVING_NAME` is patched at dump time based on the
+// game profile's Config.isUsingCasePreservingName. When false, the FName
+// is 8 bytes (ComparisonIndex/DisplayIndex aliased via union); when
+// true, it's 12 bytes with both fields stored separately.
+#define bWITH_CASE_PRESERVING_NAME false
+#if !bWITH_CASE_PRESERVING_NAME
+    union {
+#endif
+        int32_t ComparisonIndex;
+        int32_t DisplayIndex;
+#if !bWITH_CASE_PRESERVING_NAME
+    };
+#endif
     uint32_t Number;
 
     static std::string GetPlainANSIString(const FName* N)
@@ -1555,6 +1567,22 @@ void UObject::TraverseSupers(const std::function<bool(const UObject*)>& Callback
 )AIOIMPL");
 }
 
+// Substitute the embedded `#define bWITH_CASE_PRESERVING_NAME false` with
+// `... true` when the per-game profile flags case-preserving FName. The
+// switch flips ComparisonIndex/DisplayIndex from a 4-byte union into two
+// separate 4-byte fields, growing FName from 8 to 12 bytes — matches the
+// per-game UE_Offsets::FName.Size that drives Phase 1.6's NamePrivate slot.
+static std::string ApplyCasePreservingDefine(std::string content, bool casePreserving)
+{
+    if (!casePreserving) return content;
+    const std::string from = "#define bWITH_CASE_PRESERVING_NAME false";
+    const std::string to   = "#define bWITH_CASE_PRESERVING_NAME true";
+    auto pos = content.find(from);
+    if (pos != std::string::npos)
+        content.replace(pos, from.size(), to);
+    return content;
+}
+
 // ============================================================================
 //  EmitSDKCoreFiles — shared 8-file emit for SDK_A and SDK_B.
 //
@@ -1574,10 +1602,15 @@ static void EmitSDKCoreFiles(
     const std::string& prefix,
     const UE_UPackage& corePkg,
     int processEventIndex,
+    bool casePreserving,
     std::unordered_map<std::string, BufferFmt>& outBuffersMap)
 {
     // ---- 1. UECore companions (verbatim embed) -------------------------
-    outBuffersMap[prefix + "Basic.h"].append("{}", kUECoreBasicH);
+    // Basic.h's bWITH_CASE_PRESERVING_NAME #define is patched per-profile
+    // so the embedded FName layout (8B union vs 12B separate fields)
+    // matches the per-game UE_Offsets::FName.Size.
+    outBuffersMap[prefix + "Basic.h"].append("{}",
+        ApplyCasePreservingDefine(kUECoreBasicH, casePreserving));
     outBuffersMap[prefix + "Basic.cpp"].append("{}", kUECoreBasicCpp);
     outBuffersMap[prefix + "UnrealContainers.h"].append("{}", kUECoreUnrealContainersH);
 
@@ -1661,11 +1694,16 @@ static void EmitSDKCoreFiles(
 // ============================================================================
 void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
 {
+    const bool casePreserving =
+        _profile && _profile->GetUEVars() && _profile->GetUEVars()->GetOffsets()
+            ? _profile->GetUEVars()->GetOffsets()->Config.isUsingCasePreservingName
+            : false;
+
     if (_sdkProcessed.empty())
     {
         aioBufferFmt.append("#pragma once\n\n");
         aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n\n");
-        aioBufferFmt.append("{}\n", kAIOPreamble);
+        aioBufferFmt.append("{}\n", ApplyCasePreservingDefine(kAIOPreamble, casePreserving));
         logsBufferFmt.append("Saved packages: 0\nSaved classes: 0\nSaved structs: 0\nSaved enums: 0\n");
         if (!_sdkPackagesUnsaved.empty())
         {
@@ -1679,7 +1717,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
 
     aioBufferFmt.append("#pragma once\n\n");
     aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n\n");
-    aioBufferFmt.append("{}\n", kAIOPreamble);
+    aioBufferFmt.append("{}\n", ApplyCasePreservingDefine(kAIOPreamble, casePreserving));
 
     aioBufferFmt.append("// === Forward declarations ===\n\n");
     for (const auto &p : _sdkProcessed)
@@ -1803,7 +1841,11 @@ void UEDumper::DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<s
     const std::string pkgPrefix = prefix + "Packages/";
 
     // ---- 1. Root files (UECore companions + CoreUObject 4-file split) -----
-    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, outBuffersMap);
+    const bool casePreserving =
+        _profile && _profile->GetUEVars() && _profile->GetUEVars()->GetOffsets()
+            ? _profile->GetUEVars()->GetOffsets()->Config.isUsingCasePreservingName
+            : false;
+    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, casePreserving, outBuffersMap);
 
     // ---- 2. Per-package: Packages/<pkg>.hpp for every non-CoreUObject pkg ---
     size_t nonCorePkgCount = 0;
@@ -1906,7 +1948,11 @@ void UEDumper::DumpSDK_UECoreStyle(BufferFmt &logsBufferFmt, std::unordered_map<
     const std::string prefix = "SDK_B/";
 
     // 7 of the 8 files (UECore companions + CoreUObject 4-file split).
-    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, outBuffersMap);
+    const bool casePreserving =
+        _profile && _profile->GetUEVars() && _profile->GetUEVars()->GetOffsets()
+            ? _profile->GetUEVars()->GetOffsets()->Config.isUsingCasePreservingName
+            : false;
+    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, casePreserving, outBuffersMap);
 
     // 8th: SDK.hpp single-include entry.
     {
