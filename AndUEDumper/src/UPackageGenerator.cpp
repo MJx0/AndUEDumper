@@ -148,17 +148,27 @@ static const std::unordered_set<std::string> &kBuiltinIdents()
     return s;
 }
 
-// Templates whose stored data is a pointer/handle to T — therefore a forward
-// declaration of T is sufficient for the surrounding struct to be sized.
-static bool IsForwardDeclWrapper(const std::string &ident)
+// Two flavors of template wrappers based on how they store their parameter T:
+//  - PtrHandle:    stores T* (or an opaque handle); fwd decl of T suffices.
+//  - ValueHolding: stores T by value (TPair has `T First; U Second;`; TSet
+//                  embeds TSparseArray<TPair<...>>; TMap embeds a TSet of
+//                  TPair). Instantiating these requires T to be complete.
+enum class WrapperKind { PtrHandle, ValueHolding };
+
+static bool ClassifyWrapper(const std::string &ident, WrapperKind *out)
 {
-    static const std::unordered_set<std::string> wrappers = {
-        "TArray", "TMap", "TSet", "TPair",
+    static const std::unordered_set<std::string> kPtr = {
+        "TArray",
         "TWeakObjectPtr", "TLazyObjectPtr",
         "TSoftObjectPtr", "TSoftClassPtr",
         "TSubclassOf", "TScriptInterface", "TFieldPath",
     };
-    return wrappers.count(ident) != 0;
+    static const std::unordered_set<std::string> kValue = {
+        "TPair", "TSet", "TMap",
+    };
+    if (kPtr.count(ident))   { *out = WrapperKind::PtrHandle;    return true; }
+    if (kValue.count(ident)) { *out = WrapperKind::ValueHolding; return true; }
+    return false;
 }
 
 void UE_UPackage::ExtractTypeDeps(const std::string &typeStr,
@@ -167,15 +177,35 @@ void UE_UPackage::ExtractTypeDeps(const std::string &typeStr,
 {
     const auto &builtins = kBuiltinIdents();
 
-    int templateDepth = 0;
+    // Each open '<' pushes a wrapper kind. An ident inside the stack must be
+    // a fullDep if ANY enclosing wrapper is value-holding, because that
+    // wrapper instantiation can't be sized without T being complete. A
+    // pointer argument (`T*`) is always fine as fwdDep regardless of wrapper.
+    // Unknown templates fall back to ValueHolding — over-including is
+    // harmless, missing an include breaks the build.
+    std::vector<WrapperKind> wstack;
+    bool                     pendingHasKind = false;
+    WrapperKind              pendingKind    = WrapperKind::ValueHolding;
+
     size_t i = 0;
     const size_t n = typeStr.size();
 
     while (i < n)
     {
         char c = typeStr[i];
-        if (c == '<') { templateDepth++; i++; continue; }
-        if (c == '>') { templateDepth--; i++; continue; }
+
+        if (c == '<')
+        {
+            wstack.push_back(pendingHasKind ? pendingKind : WrapperKind::ValueHolding);
+            pendingHasKind = false;
+            i++; continue;
+        }
+        if (c == '>')
+        {
+            if (!wstack.empty()) wstack.pop_back();
+            pendingHasKind = false;
+            i++; continue;
+        }
 
         if (std::isalpha(static_cast<unsigned char>(c)) || c == '_')
         {
@@ -184,29 +214,53 @@ void UE_UPackage::ExtractTypeDeps(const std::string &typeStr,
                 i++;
             std::string ident = typeStr.substr(start, i - start);
 
-            // Skip whitespace looking for the next significant char
-            size_t j = i;
-            while (j < n && std::isspace(static_cast<unsigned char>(typeStr[j])))
-                j++;
-            const bool isPointer = (j < n && typeStr[j] == '*');
+            // Consume trailing whitespace as part of the ident so the
+            // wrapper-then-'<' link survives `TMap <K, V>`-style spacing.
+            while (i < n && std::isspace(static_cast<unsigned char>(typeStr[i])))
+                i++;
+
+            const bool isPointer    = (i < n && typeStr[i] == '*');
+            const bool followedByLT = (i < n && typeStr[i] == '<');
 
             if (builtins.count(ident))
+            {
+                WrapperKind k;
+                if (followedByLT && ClassifyWrapper(ident, &k))
+                {
+                    pendingKind    = k;
+                    pendingHasKind = true;
+                }
+                else
+                {
+                    pendingHasKind = false;
+                }
                 continue;
+            }
 
-            // Wrapper template names themselves don't add dependencies — we
-            // walk into their template arguments via the regular loop.
-            if (IsForwardDeclWrapper(ident))
-                continue;
-
-            // Inside <>: stored as pointer/handle by the wrapper, so a
-            // forward decl is enough. Outside <> with explicit '*' too.
-            if (templateDepth > 0 || isPointer)
+            if (wstack.empty())
+            {
+                if (isPointer) fwdDeps.insert(std::move(ident));
+                else           fullDeps.insert(std::move(ident));
+            }
+            else if (isPointer)
+            {
                 fwdDeps.insert(std::move(ident));
+            }
             else
-                fullDeps.insert(std::move(ident));
+            {
+                bool anyValue = false;
+                for (WrapperKind w : wstack)
+                {
+                    if (w == WrapperKind::ValueHolding) { anyValue = true; break; }
+                }
+                if (anyValue) fullDeps.insert(std::move(ident));
+                else          fwdDeps.insert(std::move(ident));
+            }
+            pendingHasKind = false;
         }
         else
         {
+            pendingHasKind = false;
             i++;
         }
     }
