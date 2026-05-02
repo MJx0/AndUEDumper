@@ -101,9 +101,17 @@ bool UEDumper::Dump(std::unordered_map<std::string, BufferFmt> *outBuffersMap)
         return false;
     }
 
+    BuildProcessedPackages(packages, _dumpProgressCallback);
+
     outBuffersMap->insert({"AIOHeader.hpp", BufferFmt()});
     BufferFmt &aioBufferFmt = outBuffersMap->at("AIOHeader.hpp");
-    DumpAIOHeader(logsBufferFmt, aioBufferFmt, packages, _dumpProgressCallback);
+    DumpAIOHeader(logsBufferFmt, aioBufferFmt);
+
+    if (_sdkMode == SDKMode::Both || _sdkMode == SDKMode::OnlyA)
+        DumpSDK_PerPackage(logsBufferFmt, *outBuffersMap);
+
+    if (_sdkMode == SDKMode::Both || _sdkMode == SDKMode::OnlyB)
+        DumpSDK_UECoreStyle(logsBufferFmt, *outBuffersMap);
 
     dumper_jf_ns::base_address = _profile->GetUnrealELF().base();
     if (dumper_jf_ns::jsonFunctions.size())
@@ -524,13 +532,14 @@ static std::vector<Node> TopoSort(const std::vector<Node> &nodes, DepsFn getDeps
     return out;
 }
 
-void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, UEPackagesArray &packages, const ProgressCallback &progressCallback)
+void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressCallback &progressCallback)
 {
-    int classes_saved = 0;
-    int structs_saved = 0;
-    int enums_saved = 0;
-
-    static bool processInternal_once = false;
+    _sdkProcessed.clear();
+    _sdkNameToPkg.clear();
+    _sdkPkgOrder.clear();
+    _sdkPhantomEnums.clear();
+    _sdkPhantomStructs.clear();
+    _sdkPackagesUnsaved.clear();
 
     SimpleProgressBar dumpProgress(int(packages.size()));
     if (progressCallback)
@@ -540,8 +549,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
 
     // ---- Phase 1: process every package and collect type metadata ------------
 
-    std::vector<UE_UPackage> processed;
-    processed.reserve(packages.size());
+    _sdkProcessed.reserve(packages.size());
 
     auto isExcluded = [&excludedObjects](const std::string &fullName)
     {
@@ -573,7 +581,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
                 pkg.Classes.end());
         }
 
-        processed.push_back(std::move(pkg));
+        _sdkProcessed.push_back(std::move(pkg));
     }
 
     // ---- Phase 1.5: drop preamble-provided names + collapse duplicates -----
@@ -622,7 +630,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
                 vec.end());
         };
 
-        for (auto &p : processed)
+        for (auto &p : _sdkProcessed)
         {
             dropDups(p.Enums);
             dropDups(p.Structures);
@@ -780,7 +788,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
             }
         };
 
-        for (auto &p : processed)
+        for (auto &p : _sdkProcessed)
         {
             for (auto &c : p.Classes)    augment(c);
             for (auto &s : p.Structures) augment(s); // harmless on non-targets
@@ -788,11 +796,11 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
     }
 
     // Drop packages that ended up with nothing to emit
-    std::string packages_unsaved;
+    std::string _sdkPackagesUnsaved;
     {
         std::vector<UE_UPackage> kept;
-        kept.reserve(processed.size());
-        for (auto &p : processed)
+        kept.reserve(_sdkProcessed.size());
+        for (auto &p : _sdkProcessed)
         {
             if (!p.Classes.empty() || !p.Structures.empty() || !p.Enums.empty())
             {
@@ -800,110 +808,76 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
             }
             else
             {
-                packages_unsaved += "\t";
-                packages_unsaved += p.PackageName + ",\n";
+                _sdkPackagesUnsaved += "\t";
+                _sdkPackagesUnsaved += p.PackageName + ",\n";
             }
         }
-        processed = std::move(kept);
+        _sdkProcessed = std::move(kept);
     }
 
-    if (processed.empty())
-    {
-        aioBufferFmt.append("#pragma once\n\n#include <cstdint>\n\n");
-        aioBufferFmt.append("{}\n", kAIOPreamble);
-        logsBufferFmt.append("Saved packages: 0\nSaved classes: 0\nSaved structs: 0\nSaved enums: 0\n");
-        if (!packages_unsaved.empty())
-        {
-            packages_unsaved.erase(packages_unsaved.size() - 2);
-            logsBufferFmt.append("Unsaved packages: [\n{}\n]\n", packages_unsaved);
-        }
-        logsBufferFmt.append("==========================\n");
+    if (_sdkProcessed.empty())
         return;
-    }
 
     // ---- Phase 2: build name -> package map for cross-package linking --------
 
-    std::unordered_map<std::string, size_t> nameToPkgIdx;
-    nameToPkgIdx.reserve(processed.size() * 64);
+    std::unordered_map<std::string, size_t> _sdkNameToPkg;
+    _sdkNameToPkg.reserve(_sdkProcessed.size() * 64);
 
     auto registerType = [&](const std::string &name, size_t pkgIdx)
     {
         if (name.empty()) return;
-        nameToPkgIdx.emplace(name, pkgIdx);
+        _sdkNameToPkg.emplace(name, pkgIdx);
     };
 
-    for (size_t i = 0; i < processed.size(); ++i)
+    for (size_t i = 0; i < _sdkProcessed.size(); ++i)
     {
-        for (const auto &s : processed[i].Structures) registerType(s.CppNameOnly, i);
-        for (const auto &c : processed[i].Classes)    registerType(c.CppNameOnly, i);
-        for (const auto &e : processed[i].Enums)      registerType(e.CppNameOnly, i);
+        for (const auto &s : _sdkProcessed[i].Structures) registerType(s.CppNameOnly, i);
+        for (const auto &c : _sdkProcessed[i].Classes)    registerType(c.CppNameOnly, i);
+        for (const auto &e : _sdkProcessed[i].Enums)      registerType(e.CppNameOnly, i);
     }
 
     // ---- Phase 3: build inter-package dependency graph -----------------------
 
     // Only "full" deps drive package ordering; pure forward-decl deps are
     // satisfied by the global forward-decl block emitted up front.
-    std::vector<std::unordered_set<size_t>> pkgDeps(processed.size());
+    std::vector<std::unordered_set<size_t>> pkgDeps(_sdkProcessed.size());
 
     auto recordDeps = [&](size_t pkgIdx, const UE_UPackage::Struct &s)
     {
         for (const auto &dep : s.FullDeps)
         {
-            auto it = nameToPkgIdx.find(dep);
-            if (it == nameToPkgIdx.end()) continue;
+            auto it = _sdkNameToPkg.find(dep);
+            if (it == _sdkNameToPkg.end()) continue;
             if (it->second == pkgIdx) continue;
             pkgDeps[pkgIdx].insert(it->second);
         }
     };
 
-    for (size_t i = 0; i < processed.size(); ++i)
+    for (size_t i = 0; i < _sdkProcessed.size(); ++i)
     {
-        for (const auto &s : processed[i].Structures) recordDeps(i, s);
-        for (const auto &c : processed[i].Classes)    recordDeps(i, c);
+        for (const auto &s : _sdkProcessed[i].Structures) recordDeps(i, s);
+        for (const auto &c : _sdkProcessed[i].Classes)    recordDeps(i, c);
     }
 
     // ---- Phase 4: topological sort packages ----------------------------------
 
-    std::vector<size_t> pkgOrder;
-    pkgOrder.reserve(processed.size());
+    _sdkPkgOrder.reserve(_sdkProcessed.size());
     {
-        std::vector<size_t> indices(processed.size());
-        for (size_t i = 0; i < processed.size(); ++i) indices[i] = i;
+        std::vector<size_t> indices(_sdkProcessed.size());
+        for (size_t i = 0; i < _sdkProcessed.size(); ++i) indices[i] = i;
 
-        pkgOrder = TopoSort<size_t>(indices, [&](size_t i) -> const std::unordered_set<size_t> &
+        _sdkPkgOrder = TopoSort<size_t>(indices, [&](size_t i) -> const std::unordered_set<size_t> &
         {
             return pkgDeps[i];
         });
     }
 
-    // ---- Phase 5: emit AIOHeader ---------------------------------------------
-
-    aioBufferFmt.append("#pragma once\n\n#include <cstdint>\n\n");
-    aioBufferFmt.append("{}\n", kAIOPreamble);
-
-    // 5a. Forward declarations of every dumped enum, struct and class. Pointer
-    //     and template-wrapped references between packages are resolved via
-    //     these forward decls, so cyclic class graphs compile cleanly.
-    aioBufferFmt.append("// === Forward declarations ===\n\n");
-    for (const auto &p : processed)
-    {
-        for (const auto &e : p.Enums)
-            aioBufferFmt.append("enum class {} : {};\n", e.CppNameOnly, e.UnderlyingType);
-    }
-    aioBufferFmt.append("\n");
-    for (const auto &p : processed)
-    {
-        for (const auto &s : p.Structures) aioBufferFmt.append("struct {};\n", s.CppNameOnly);
-        for (const auto &c : p.Classes)    aioBufferFmt.append("struct {};\n", c.CppNameOnly);
-    }
-    aioBufferFmt.append("\n");
-
-    // 5a'. Phantom forward declarations: any name that appears in some
-    //      member's type string but isn't defined by any dumped struct/
-    //      class/enum AND isn't supplied by the preamble. Comes from
-    //      partially-resolved property types (e.g. `TFieldPath<FBoolProperty>`,
-    //      bare `ObjectPtrProperty` returns, `EBlah` enum references where
-    //      the enum object wasn't reachable). We classify by UE prefix.
+    // ---- Compute phantom forward declarations -------------------------------
+    //
+    // Type names referenced in member / function signatures but not defined as
+    // a dumped struct/enum (typically partially-resolved property kinds) end
+    // up here. Forward decls keep pointer / template / signature usages
+    // compilable.
     {
         static const std::unordered_set<std::string> kPreambleNames = {
             "FName", "FString", "FText",
@@ -917,24 +891,20 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
             "TSubclassOf", "TScriptInterface", "TFieldPath",
             "None", "FNone",
         };
-        std::set<std::string> phantomEnums;
-        std::set<std::string> phantomStructs;
         auto considerName = [&](const std::string &name)
         {
             if (name.empty()) return;
             if (kPreambleNames.count(name)) return;
-            if (nameToPkgIdx.count(name)) return;
+            if (_sdkNameToPkg.count(name)) return;
             if (name.size() < 2 || !std::isupper(static_cast<unsigned char>(name[0])))
                 return;
             const char prefix = name[0];
             if (prefix == 'E')
-                phantomEnums.insert(name);
-            else if (prefix == 'F' || prefix == 'U' || prefix == 'A' || prefix == 'I')
-                phantomStructs.insert(name);
+                _sdkPhantomEnums.insert(name);
             else
-                phantomStructs.insert(name);
+                _sdkPhantomStructs.insert(name);
         };
-        for (const auto &p : processed)
+        for (const auto &p : _sdkProcessed)
         {
             auto walk = [&](const UE_UPackage::Struct &s)
             {
@@ -944,24 +914,13 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
             for (const auto &s : p.Structures) walk(s);
             for (const auto &c : p.Classes)    walk(c);
         }
-        if (!phantomEnums.empty() || !phantomStructs.empty())
-        {
-            aioBufferFmt.append("// === Phantom forward declarations ===\n");
-            aioBufferFmt.append("// Type names referenced in member / function signatures but not\n");
-            aioBufferFmt.append("// defined as a dumped struct/enum (typically partially-resolved\n");
-            aioBufferFmt.append("// property kinds). Forward decls keep pointer / template /\n");
-            aioBufferFmt.append("// signature usages compilable.\n");
-            for (const auto &n : phantomEnums)
-                aioBufferFmt.append("enum class {} : uint8_t;\n", n);
-            for (const auto &n : phantomStructs)
-                aioBufferFmt.append("struct {};\n", n);
-            aioBufferFmt.append("\n");
-        }
     }
 
-    // 5b. Per-package output, packages in topological order, structs/classes
-    //     within each package sorted by their intra-package full-type deps.
-    auto sortByDeps = [&](size_t pkgIdx, std::vector<UE_UPackage::Struct> &items)
+    // ---- Intra-package topological sort on structs / classes ----------------
+    //
+    // Same-package value-type deps must be defined first inside the same
+    // header. Run once here so all emit functions share the result.
+    auto sortByDeps = [&](std::vector<UE_UPackage::Struct> &items)
     {
         std::unordered_map<std::string, size_t> nameToLocal;
         nameToLocal.reserve(items.size());
@@ -976,12 +935,10 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
         {
             for (const auto &dep : items[i].FullDeps)
             {
-                // Same-package value-type deps must be defined first
                 auto it = nameToLocal.find(dep);
                 if (it != nameToLocal.end()) deps[i].push_back(it->second);
             }
         }
-        (void)pkgIdx;
 
         auto sorted = TopoSort<size_t>(indices, [&](size_t i) -> const std::vector<size_t> &
         {
@@ -994,34 +951,19 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
         items = std::move(reordered);
     };
 
-    int packages_saved = 0;
-    for (size_t pkgIdx : pkgOrder)
+    for (auto &p : _sdkProcessed)
     {
-        auto &pkg = processed[pkgIdx];
+        if (!p.Structures.empty()) sortByDeps(p.Structures);
+        if (!p.Classes.empty())    sortByDeps(p.Classes);
+    }
 
-        aioBufferFmt.append("// Package: {}\n// Enums: {}\n// Structs: {}\n// Classes: {}\n\n",
-                            pkg.PackageName, pkg.Enums.size(), pkg.Structures.size(), pkg.Classes.size());
-
-        if (!pkg.Enums.empty())
-            UE_UPackage::AppendEnumsToBuffer(pkg.Enums, &aioBufferFmt);
-
-        if (!pkg.Structures.empty())
-        {
-            sortByDeps(pkgIdx, pkg.Structures);
-            UE_UPackage::AppendStructsToBuffer(pkg.Structures, &aioBufferFmt);
-        }
-
-        if (!pkg.Classes.empty())
-        {
-            sortByDeps(pkgIdx, pkg.Classes);
-            UE_UPackage::AppendStructsToBuffer(pkg.Classes, &aioBufferFmt);
-        }
-
-        packages_saved++;
-        classes_saved += pkg.Classes.size();
-        structs_saved += pkg.Structures.size();
-        enums_saved += pkg.Enums.size();
-
+    // ---- Collect script.json function entries -------------------------------
+    //
+    // Done here once so the various emit functions don't double-collect.
+    static bool processInternal_once = false;
+    for (size_t pkgIdx : _sdkPkgOrder)
+    {
+        const auto &pkg = _sdkProcessed[pkgIdx];
         for (const auto &cls : pkg.Classes)
         {
             for (const auto &func : cls.Functions)
@@ -1031,7 +973,6 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
                     dumper_jf_ns::jsonFunctions.push_back({"UObject", "ProcessInternal", func.Func});
                     processInternal_once = true;
                 }
-
                 if ((func.EFlags & FUNC_Native) && func.Func)
                 {
                     std::string execFuncName = "exec";
@@ -1040,7 +981,6 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
                 }
             }
         }
-
         for (const auto &st : pkg.Structures)
         {
             for (const auto &func : st.Functions)
@@ -1054,47 +994,338 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt, 
             }
         }
     }
+}
 
-    // ---- Phase 5c: AIOCore inline helpers ------------------------------------
-    //
-    // Goes at the very end so it can dispatch through UFunction (defined
-    // mid-file once CoreUObject lands). The augmenter (Phase 1.6) already
-    // injected matching declarations on UObject; this block supplies the
-    // inline bodies that pull the per-game ProcessEvent vtable slot out of
-    // the dump.
-    aioBufferFmt.append("\n// === AIO Core Helpers ===\n");
-    aioBufferFmt.append("// Generated runtime glue tying the dumped UE reflection layout to\n");
-    aioBufferFmt.append("// per-game offsets discovered during the dump. The ProcessEvent\n");
-    aioBufferFmt.append("// vtable slot baked in here lets `Obj->ProcessEvent(Func, &Parms)`\n");
-    aioBufferFmt.append("// dispatch correctly without a separate runtime initialiser.\n\n");
-    aioBufferFmt.append("#ifndef AIOHeader_CORE_HELPERS_DEFINED\n");
-    aioBufferFmt.append("#define AIOHeader_CORE_HELPERS_DEFINED\n\n");
-    aioBufferFmt.append("namespace AIOCore\n{{\n");
-    aioBufferFmt.append("    // Vtable slot of UObject::ProcessEvent in the target image.\n");
-    aioBufferFmt.append("    // Discovered during dumping; override by #define-ing\n");
-    aioBufferFmt.append("    // AIOCORE_PROCESS_EVENT_INDEX before #include if you need to\n");
-    aioBufferFmt.append("    // swap it for a custom build.\n");
-    aioBufferFmt.append("    #ifdef AIOCORE_PROCESS_EVENT_INDEX\n");
-    aioBufferFmt.append("    constexpr int kProcessEventIndex = AIOCORE_PROCESS_EVENT_INDEX;\n");
-    aioBufferFmt.append("    #else\n");
-    aioBufferFmt.append("    constexpr int kProcessEventIndex = {};\n", _processEventIndex);
-    aioBufferFmt.append("    #endif\n");
-    aioBufferFmt.append("}}\n\n");
-    aioBufferFmt.append("inline void UObject::ProcessEvent(struct UFunction* Function, void* Parms) const\n");
-    aioBufferFmt.append("{{\n");
-    aioBufferFmt.append("    using FN = void(*)(const UObject*, struct UFunction*, void*);\n");
-    aioBufferFmt.append("    auto vtbl = *reinterpret_cast<void* const* const*>(this);\n");
-    aioBufferFmt.append("    reinterpret_cast<FN>(vtbl[AIOCore::kProcessEventIndex])(this, Function, Parms);\n");
-    aioBufferFmt.append("}}\n\n");
-    aioBufferFmt.append("#endif // AIOHeader_CORE_HELPERS_DEFINED\n");
+// ============================================================================
+//  AIOCore helper block — emitted at the end of headers that contain
+//  UObject's full definition. The augmenter (Phase 1.6) injected a matching
+//  declaration on UObject; the inline body below dispatches through
+//  vtable[ProcessEventIndex].
+// ============================================================================
+static void EmitAIOCoreHelpersBlock(BufferFmt &buf, int processEventIndex)
+{
+    buf.append("\n// === AIO Core Helpers ===\n");
+    buf.append("// Generated runtime glue tying the dumped UE reflection layout to\n");
+    buf.append("// per-game offsets discovered during the dump. The ProcessEvent\n");
+    buf.append("// vtable slot baked in here lets `Obj->ProcessEvent(Func, &Parms)`\n");
+    buf.append("// dispatch correctly without a separate runtime initialiser.\n\n");
+    buf.append("#ifndef AIOHeader_CORE_HELPERS_DEFINED\n");
+    buf.append("#define AIOHeader_CORE_HELPERS_DEFINED\n\n");
+    buf.append("namespace AIOCore\n{{\n");
+    buf.append("    // Vtable slot of UObject::ProcessEvent in the target image.\n");
+    buf.append("    // Discovered during dumping; override by #define-ing\n");
+    buf.append("    // AIOCORE_PROCESS_EVENT_INDEX before #include if you need to\n");
+    buf.append("    // swap it for a custom build.\n");
+    buf.append("    #ifdef AIOCORE_PROCESS_EVENT_INDEX\n");
+    buf.append("    constexpr int kProcessEventIndex = AIOCORE_PROCESS_EVENT_INDEX;\n");
+    buf.append("    #else\n");
+    buf.append("    constexpr int kProcessEventIndex = {};\n", processEventIndex);
+    buf.append("    #endif\n");
+    buf.append("}}\n\n");
+    buf.append("inline void UObject::ProcessEvent(struct UFunction* Function, void* Parms) const\n");
+    buf.append("{{\n");
+    buf.append("    using FN = void(*)(const UObject*, struct UFunction*, void*);\n");
+    buf.append("    auto vtbl = *reinterpret_cast<void* const* const*>(this);\n");
+    buf.append("    reinterpret_cast<FN>(vtbl[AIOCore::kProcessEventIndex])(this, Function, Parms);\n");
+    buf.append("}}\n\n");
+    buf.append("#endif // AIOHeader_CORE_HELPERS_DEFINED\n");
+}
 
-    logsBufferFmt.append("Saved packages: {}\nSaved classes: {}\nSaved structs: {}\nSaved enums: {}\n", packages_saved, classes_saved, structs_saved, enums_saved);
-
-    if (!packages_unsaved.empty())
+// ============================================================================
+//  DumpAIOHeader — single monolithic header containing every dumped type.
+// ============================================================================
+void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
+{
+    if (_sdkProcessed.empty())
     {
-        packages_unsaved.erase(packages_unsaved.size() - 2);
-        logsBufferFmt.append("Unsaved packages: [\n{}\n]\n", packages_unsaved);
+        aioBufferFmt.append("#pragma once\n\n#include <cstdint>\n\n");
+        aioBufferFmt.append("{}\n", kAIOPreamble);
+        logsBufferFmt.append("Saved packages: 0\nSaved classes: 0\nSaved structs: 0\nSaved enums: 0\n");
+        if (!_sdkPackagesUnsaved.empty())
+        {
+            std::string un = _sdkPackagesUnsaved;
+            un.erase(un.size() - 2);
+            logsBufferFmt.append("Unsaved packages: [\n{}\n]\n", un);
+        }
+        logsBufferFmt.append("==========================\n");
+        return;
     }
 
+    aioBufferFmt.append("#pragma once\n\n#include <cstdint>\n\n");
+    aioBufferFmt.append("{}\n", kAIOPreamble);
+
+    aioBufferFmt.append("// === Forward declarations ===\n\n");
+    for (const auto &p : _sdkProcessed)
+    {
+        for (const auto &e : p.Enums)
+            aioBufferFmt.append("enum class {} : {};\n", e.CppNameOnly, e.UnderlyingType);
+    }
+    aioBufferFmt.append("\n");
+    for (const auto &p : _sdkProcessed)
+    {
+        for (const auto &s : p.Structures) aioBufferFmt.append("struct {};\n", s.CppNameOnly);
+        for (const auto &c : p.Classes)    aioBufferFmt.append("struct {};\n", c.CppNameOnly);
+    }
+    aioBufferFmt.append("\n");
+
+    if (!_sdkPhantomEnums.empty() || !_sdkPhantomStructs.empty())
+    {
+        aioBufferFmt.append("// === Phantom forward declarations ===\n");
+        aioBufferFmt.append("// Type names referenced in member / function signatures but not\n");
+        aioBufferFmt.append("// defined as a dumped struct/enum (typically partially-resolved\n");
+        aioBufferFmt.append("// property kinds). Forward decls keep pointer / template /\n");
+        aioBufferFmt.append("// signature usages compilable.\n");
+        for (const auto &n : _sdkPhantomEnums)
+            aioBufferFmt.append("enum class {} : uint8_t;\n", n);
+        for (const auto &n : _sdkPhantomStructs)
+            aioBufferFmt.append("struct {};\n", n);
+        aioBufferFmt.append("\n");
+    }
+
+    int packages_saved = 0;
+    int classes_saved = 0;
+    int structs_saved = 0;
+    int enums_saved = 0;
+
+    for (size_t pkgIdx : _sdkPkgOrder)
+    {
+        auto &pkg = _sdkProcessed[pkgIdx];
+
+        aioBufferFmt.append("// Package: {}\n// Enums: {}\n// Structs: {}\n// Classes: {}\n\n",
+                            pkg.PackageName, pkg.Enums.size(), pkg.Structures.size(), pkg.Classes.size());
+
+        if (!pkg.Enums.empty())
+            UE_UPackage::AppendEnumsToBuffer(pkg.Enums, &aioBufferFmt);
+
+        if (!pkg.Structures.empty())
+            UE_UPackage::AppendStructsToBuffer(pkg.Structures, &aioBufferFmt);
+
+        if (!pkg.Classes.empty())
+            UE_UPackage::AppendStructsToBuffer(pkg.Classes, &aioBufferFmt);
+
+        packages_saved++;
+        classes_saved += pkg.Classes.size();
+        structs_saved += pkg.Structures.size();
+        enums_saved   += pkg.Enums.size();
+    }
+
+    EmitAIOCoreHelpersBlock(aioBufferFmt, _processEventIndex);
+
+    logsBufferFmt.append("Saved packages: {}\nSaved classes: {}\nSaved structs: {}\nSaved enums: {}\n",
+                         packages_saved, classes_saved, structs_saved, enums_saved);
+
+    if (!_sdkPackagesUnsaved.empty())
+    {
+        std::string un = _sdkPackagesUnsaved;
+        un.erase(un.size() - 2);
+        logsBufferFmt.append("Unsaved packages: [\n{}\n]\n", un);
+    }
+
+    logsBufferFmt.append("==========================\n");
+}
+
+// ============================================================================
+//  DumpSDK_PerPackage (Plan A) — Basic.hpp + <pkg>.hpp x N + SDK.hpp.
+//
+//  Each package gets a single header that #includes Basic.hpp + every
+//  cross-package full-type dep. Lets callers `#include "SDK_A/CoreUObject.hpp"`
+//  and pull just FVector/UObject/etc without the rest of the dump.
+// ============================================================================
+void UEDumper::DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<std::string, BufferFmt> &outBuffersMap)
+{
+    if (_sdkProcessed.empty())
+    {
+        logsBufferFmt.append("SDK Plan A: empty processed packages, skipping.\n");
+        return;
+    }
+
+    const std::string prefix = "SDK_A/";
+
+    // Basic.hpp — preamble + global forward decls + phantom decls
+    {
+        auto &basicBuf = outBuffersMap[prefix + "Basic.hpp"];
+        basicBuf.append("#pragma once\n\n#include <cstdint>\n\n");
+        basicBuf.append("{}\n", kAIOPreamble);
+        basicBuf.append("// === Forward declarations of all dumped types ===\n\n");
+        for (const auto &p : _sdkProcessed)
+        {
+            for (const auto &e : p.Enums)
+                basicBuf.append("enum class {} : {};\n", e.CppNameOnly, e.UnderlyingType);
+        }
+        basicBuf.append("\n");
+        for (const auto &p : _sdkProcessed)
+        {
+            for (const auto &s : p.Structures) basicBuf.append("struct {};\n", s.CppNameOnly);
+            for (const auto &c : p.Classes)    basicBuf.append("struct {};\n", c.CppNameOnly);
+        }
+        basicBuf.append("\n");
+        if (!_sdkPhantomEnums.empty() || !_sdkPhantomStructs.empty())
+        {
+            basicBuf.append("// === Phantom forward declarations ===\n");
+            for (const auto &n : _sdkPhantomEnums)
+                basicBuf.append("enum class {} : uint8_t;\n", n);
+            for (const auto &n : _sdkPhantomStructs)
+                basicBuf.append("struct {};\n", n);
+            basicBuf.append("\n");
+        }
+    }
+
+    // Per-package: <pkg>.hpp
+    for (size_t pkgIdx : _sdkPkgOrder)
+    {
+        auto &pkg = _sdkProcessed[pkgIdx];
+        const std::string fname = prefix + pkg.PackageName + ".hpp";
+        auto &buf = outBuffersMap[fname];
+
+        buf.append("#pragma once\n\n");
+        buf.append("#include \"Basic.hpp\"\n");
+
+        std::set<std::string> depPkgs;
+        auto collect = [&](const UE_UPackage::Struct &s) {
+            for (const auto &dep : s.FullDeps)
+            {
+                auto it = _sdkNameToPkg.find(dep);
+                if (it == _sdkNameToPkg.end()) continue;
+                if (it->second == pkgIdx) continue;
+                depPkgs.insert(_sdkProcessed[it->second].PackageName);
+            }
+        };
+        for (const auto &s : pkg.Structures) collect(s);
+        for (const auto &c : pkg.Classes)    collect(c);
+        for (const auto &dp : depPkgs)
+            buf.append("#include \"{}.hpp\"\n", dp);
+        buf.append("\n");
+
+        buf.append("// Package: {}\n// Enums: {}\n// Structs: {}\n// Classes: {}\n\n",
+                   pkg.PackageName, pkg.Enums.size(), pkg.Structures.size(), pkg.Classes.size());
+
+        if (!pkg.Enums.empty())      UE_UPackage::AppendEnumsToBuffer(pkg.Enums, &buf);
+        if (!pkg.Structures.empty()) UE_UPackage::AppendStructsToBuffer(pkg.Structures, &buf);
+        if (!pkg.Classes.empty())    UE_UPackage::AppendStructsToBuffer(pkg.Classes, &buf);
+
+        if (pkg.PackageName == "CoreUObject")
+            EmitAIOCoreHelpersBlock(buf, _processEventIndex);
+    }
+
+    // SDK.hpp aggregator
+    {
+        auto &sdkBuf = outBuffersMap[prefix + "SDK.hpp"];
+        sdkBuf.append("#pragma once\n\n");
+        sdkBuf.append("// Aggregator: every per-package header in topological order.\n\n");
+        for (size_t pkgIdx : _sdkPkgOrder)
+        {
+            const auto &pkg = _sdkProcessed[pkgIdx];
+            sdkBuf.append("#include \"{}.hpp\"\n", pkg.PackageName);
+        }
+    }
+
+    logsBufferFmt.append("SDK Plan A: emitted {}Basic.hpp + {} package files + {}SDK.hpp\n",
+                         prefix, _sdkPkgOrder.size(), prefix);
+    logsBufferFmt.append("==========================\n");
+}
+
+// ============================================================================
+//  DumpSDK_UECoreStyle (Plan B) — UECore-style core-only split.
+//
+//  Emits ONLY the CoreUObject reflection package as four files mirroring
+//  source/UEProber/UECore/CoreUObject_{classes,structs,parameters,functions}.h.
+//  Other game-specific packages stay in the monolithic AIOHeader.hpp —
+//  Plan B is meant to pair with the hand-written UECore/Basic.h +
+//  UECore/UnrealContainers.h companions, not to replace them, so the total
+//  file count stays under ten.
+//
+//  The four CoreUObject_*.hpp files transitively #include "Basic.h" and
+//  "UnrealContainers.h", which the user is expected to drop in (copy from
+//  source/UEProber/UECore/) next to the dumped output, or add to the
+//  include path.
+// ============================================================================
+void UEDumper::DumpSDK_UECoreStyle(BufferFmt &logsBufferFmt, std::unordered_map<std::string, BufferFmt> &outBuffersMap)
+{
+    if (_sdkProcessed.empty())
+    {
+        logsBufferFmt.append("SDK Plan B: empty processed packages, skipping.\n");
+        return;
+    }
+
+    // Plan B targets only the CoreUObject package — locate it.
+    const size_t kNotFound = static_cast<size_t>(-1);
+    size_t coreIdx = kNotFound;
+    for (size_t i = 0; i < _sdkProcessed.size(); ++i)
+    {
+        if (_sdkProcessed[i].PackageName == "CoreUObject")
+        {
+            coreIdx = i;
+            break;
+        }
+    }
+    if (coreIdx == kNotFound)
+    {
+        logsBufferFmt.append("SDK Plan B: CoreUObject package not found in dump, skipping.\n");
+        return;
+    }
+
+    const std::string prefix = "SDK_B/";
+    auto &pkg = _sdkProcessed[coreIdx];
+
+    // CoreUObject_structs.hpp — enums + ScriptStructs (FVector / FRotator / ...)
+    {
+        auto &buf = outBuffersMap[prefix + "CoreUObject_structs.hpp"];
+        buf.append("#pragma once\n\n");
+        buf.append("// Pair this file with the hand-written UECore companions:\n");
+        buf.append("//   Basic.h / Basic.cpp / UnrealContainers.h\n");
+        buf.append("// from source/UEProber/UECore/. Drop them next to this file or\n");
+        buf.append("// add their directory to your include path.\n\n");
+        buf.append("#include \"Basic.h\"\n");
+        buf.append("#include \"UnrealContainers.h\"\n\n");
+        buf.append("// Package: CoreUObject - Enums({}) + Structs({})\n\n",
+                   pkg.Enums.size(), pkg.Structures.size());
+        if (!pkg.Enums.empty())      UE_UPackage::AppendEnumsToBuffer(pkg.Enums, &buf);
+        if (!pkg.Structures.empty()) UE_UPackage::AppendStructsToBuffer(pkg.Structures, &buf);
+    }
+
+    // CoreUObject_classes.hpp — UClass-derived (UObject family augmented in
+    // Phase 1.6) + AIOCore inline ProcessEvent body at the bottom.
+    {
+        auto &buf = outBuffersMap[prefix + "CoreUObject_classes.hpp"];
+        buf.append("#pragma once\n\n");
+        buf.append("#include \"CoreUObject_structs.hpp\"\n\n");
+        buf.append("// Package: CoreUObject - Classes({})\n\n", pkg.Classes.size());
+        if (!pkg.Classes.empty()) UE_UPackage::AppendStructsToBuffer(pkg.Classes, &buf);
+
+        EmitAIOCoreHelpersBlock(buf, _processEventIndex);
+    }
+
+    // CoreUObject_parameters.hpp — stub. Future passes will emit one Params
+    // struct per UFunction here.
+    {
+        auto &buf = outBuffersMap[prefix + "CoreUObject_parameters.hpp"];
+        buf.append("#pragma once\n\n");
+        buf.append("// CoreUObject ProcessEvent parameter structs.\n");
+        buf.append("// Currently empty; future passes will emit one struct per UFunction.\n\n");
+        buf.append("#include \"CoreUObject_structs.hpp\"\n");
+    }
+
+    // CoreUObject_functions.cpp — stub. Future passes will emit function
+    // bodies that dispatch through AIOCore::kProcessEventIndex.
+    {
+        auto &buf = outBuffersMap[prefix + "CoreUObject_functions.cpp"];
+        buf.append("// CoreUObject function bodies (ProcessEvent dispatch).\n");
+        buf.append("// Currently empty; future passes will emit one body per UFunction\n");
+        buf.append("// using AIOCore::kProcessEventIndex from CoreUObject_classes.hpp.\n\n");
+        buf.append("#include \"CoreUObject_classes.hpp\"\n");
+        buf.append("#include \"CoreUObject_parameters.hpp\"\n");
+    }
+
+    // SDK.hpp — single-include entry point.
+    {
+        auto &buf = outBuffersMap[prefix + "SDK.hpp"];
+        buf.append("#pragma once\n\n");
+        buf.append("// Single-include entry. Pulls CoreUObject_classes.hpp which\n");
+        buf.append("// transitively pulls CoreUObject_structs.hpp + Basic.h +\n");
+        buf.append("// UnrealContainers.h.\n\n");
+        buf.append("#include \"CoreUObject_classes.hpp\"\n");
+    }
+
+    logsBufferFmt.append("SDK Plan B: emitted CoreUObject (4 files) + SDK.hpp under {}\n", prefix);
     logsBufferFmt.append("==========================\n");
 }
