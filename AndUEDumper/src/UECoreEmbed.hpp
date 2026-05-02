@@ -1397,14 +1397,11 @@ static const char* kUECoreUnrealContainersH = R"UECoreUC(
 
 // Container implementations with iterators. See https://github.com/Fischsalat/UnrealContainers
 
-#include <memory>
 #include <string>
 #include <stdexcept>
 #include <iostream>
 #if defined(__GNUC__) || defined(__clang__)
-#include <codecvt>
-#include <locale>
-#else
+#include "utfcpp/unchecked.h"
 #endif
 
 namespace UC
@@ -1727,45 +1724,31 @@ namespace UC
 	};
 
 #if defined(__GNUC__) || defined(__clang__)
-	class FString : public TArray<char16_t> {
+	class FString : public TArray<wchar_t>
+	{
 	public:
-		FString() { }
-
-		inline FString(const std::string& str) {
-			std::u16string u16str = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>().from_bytes(str);
-			MaxElements = NumElements = u16str.empty() ? 0 : u16str.length() + 1;
-			if (NumElements) {
-				// std::unique_ptr<char16_t[]> _Data(new char16_t[NumElements]);=
-				// memcpy(_Data.get(), u16str.data(), NumElements * sizeof(char16_t));
-				// Data = _Data.get();
-				std::shared_ptr<char16_t[]> _Data = std::make_shared<char16_t[]>(NumElements);
-				memcpy(_Data.get(), u16str.data(), NumElements * sizeof(char16_t));
-				Data = _Data.get();
-			}
+		FString() = default;
+		inline FString(const wchar_t *wstr)
+		{
+			MaxElements = NumElements = (wstr && *wstr) ? int32_t(std::wcslen(wstr)) + 1 : 0;
+			if (NumElements) Data = const_cast<wchar_t *>(wstr);
 		}
 
-		inline FString(const char *str) : FString(std::string(str)) { }
+		inline FString operator=(const wchar_t *&&other) { return FString(other); }
 
-		inline std::string ToString() const {
-			if (IsValid()) {
-				return std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>().to_bytes(Data);
-			}
-			return "";
+		inline std::wstring ToWString() const { return IsValid() ? Data : L""; }
+
+		std::string ToString() const
+		{
+			if (!IsValid()) return "";
+
+			std::wstring wstr = ToWString();
+			if (wstr.empty()) return "";
+
+			std::string result;
+			utf8::unchecked::utf16to8(wstr.begin(), wstr.end(), std::back_inserter(result));
+			return result;
 		}
-
-    	// inline std::wstring ToWString() const { return IsValid() ? Data : L""; }
-
-		// std::string ToString() const
-		// {
-		// 	if (!IsValid()) return "";
-
-		// 	std::wstring wstr = ToWString();
-		// 	if (wstr.empty()) return "";
-
-		// 	std::string result;
-		// 	utf8::unchecked::utf16to8(wstr.begin(), wstr.end(), std::back_inserter(result));
-		// 	return result;
-		// }
 	};
 #else
 	class FString : public TArray<wchar_t>
@@ -1868,11 +1851,7 @@ namespace UC
 	public:
 		FAllocatedString(int32 Size)
 		{
-#if defined(__GNUC__) || defined(__clang__)
-			Data = static_cast<char16_t*>(malloc(Size * sizeof(char16_t)));
-#else
 			Data = static_cast<wchar_t*>(malloc(Size * sizeof(wchar_t)));
-#endif
 			NumElements = 0x0;
 			MaxElements = Size;
 		}
