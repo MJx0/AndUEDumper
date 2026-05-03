@@ -1184,7 +1184,10 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
 
     // ---- Phase 2: build name -> package map for cross-package linking --------
 
-    std::unordered_map<std::string, size_t> _sdkNameToPkg;
+    // _sdkNameToPkg is a class member (cleared at the top of DumpSDK).
+    // Without the explicit `this->`, a re-declaration here would shadow it
+    // and silently leave the real member empty, which broke per-pkg
+    // cross-pkg #include emission downstream in DumpSDK_PerPackage.
     _sdkNameToPkg.reserve(_sdkProcessed.size() * 64);
 
     auto registerType = [&](const std::string &name, size_t pkgIdx)
