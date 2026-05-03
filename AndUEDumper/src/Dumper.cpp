@@ -682,7 +682,7 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
 {
     _sdkProcessed.clear();
     _sdkNameToPkg.clear();
-    _sdkEnumNames.clear();
+    _sdkEnumUnderlying.clear();
     _sdkPkgOrder.clear();
     _sdkPhantomEnums.clear();
     _sdkPhantomStructs.clear();
@@ -1204,37 +1204,8 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
         for (const auto &e : _sdkProcessed[i].Enums)
         {
             registerType(e.CppNameOnly, i);
-            _sdkEnumNames.insert(e.CppNameOnly);
+            _sdkEnumUnderlying.emplace(e.CppNameOnly, e.UnderlyingType);
         }
-    }
-
-    // ---- Phase 2.5: promote enum ForwardDeps -> FullDeps ---------------------
-    //
-    // ExtractTypeDeps treats `TArray<EFoo>` / `TMap<K, EFoo>` (PtrHandle outer
-    // wrapper) as a forward-decl-only ref to EFoo. That works for class types
-    // but not for enums: a C++ forward declaration of an enum requires the
-    // underlying type, which we don't carry to the use site, and even then a
-    // sized member can't be declared from `enum class EFoo : uint8_t;` alone.
-    // Promote any enum-typed ForwardDep so the cross-pkg #include collector
-    // pulls the defining package's .hpp.
-    for (auto &pkg : _sdkProcessed)
-    {
-        auto reclassify = [&](UE_UPackage::Struct &s) {
-            for (auto it = s.ForwardDeps.begin(); it != s.ForwardDeps.end();)
-            {
-                if (_sdkEnumNames.count(*it))
-                {
-                    s.FullDeps.insert(*it);
-                    it = s.ForwardDeps.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
-        };
-        for (auto &s : pkg.Structures) reclassify(s);
-        for (auto &c : pkg.Classes)    reclassify(c);
     }
 
     // ---- Phase 3: build inter-package dependency graph -----------------------
@@ -1795,7 +1766,8 @@ static void EmitUClassGetFunctionBody(BufferFmt &buf, bool emitInline)
 // ============================================================================
 static void EmitUFunctionBody(BufferFmt &buf,
                               const UE_UPackage::Function &f,
-                              bool emitInline)
+                              bool emitInline,
+                              const std::unordered_map<std::string, std::string> &enumUnderlying)
 {
     const char *kw = emitInline ? "inline " : "";
 
@@ -1817,6 +1789,20 @@ static void EmitUFunctionBody(BufferFmt &buf,
                               + headOnly.substr(spacePos + 1);
 
     const bool hasReturn = (f.ReturnType != "void");
+
+    // For enum types, prefix with `enum class` when used as an elaborated
+    // type specifier in the local Parms struct or in a cast. Two reasons:
+    //  (1) UE occasionally produces parameter names identical to the enum
+    //      type name (e.g. `EaseType EaseType`). Inside the function body
+    //      the parameter shadows the namespace-scope enum, so unqualified
+    //      `EaseType` resolves to the variable. `enum class EaseType` is
+    //      an elaborated specifier that bypasses ordinary lookup.
+    //  (2) The forward decl block in the per-pkg header writes
+    //      `enum class EFoo : ut;` for cross-pkg enums; `enum class EFoo`
+    //      finds it whether the full definition has been seen yet or not.
+    auto qualifyType = [&](const std::string &t) -> std::string {
+        return enumUnderlying.count(t) ? "enum class " + t : t;
+    };
 
     buf.append("{}{}({})\n{{\n", kw, qualifiedHead, f.Params);
 
@@ -1843,18 +1829,24 @@ static void EmitUFunctionBody(BufferFmt &buf,
     buf.append("    struct\n    {{\n");
     for (const auto &p : f.ParamsList)
     {
+        const std::string fieldType = qualifyType(p.Type);
         if (p.ArrayDim > 1)
-            buf.append("        {} {}[0x{:X}];\n", p.Type, p.Name, p.ArrayDim);
+            buf.append("        {} {}[0x{:X}];\n", fieldType, p.Name, p.ArrayDim);
         else
-            buf.append("        {} {};\n", p.Type, p.Name);
+            buf.append("        {} {};\n", fieldType, p.Name);
     }
     if (hasReturn)
-        buf.append("        {} ReturnValue;\n", f.ReturnType);
+        buf.append("        {} ReturnValue;\n", qualifyType(f.ReturnType));
     buf.append("    }} Parms{{}};\n");
 
     // Fill in-params. ConstParm + OutParm degenerates to "const Type&" in
     // signature but is treated as an in-param at marshalling time. Pure
     // out-params are *not* filled (callers don't pass anything in).
+    //
+    // The C-style cast on the assignment is deliberate: `const ConstParm`
+    // refs would otherwise refuse to bind to the non-const Parms field
+    // (`assigning to T* from const T* discards qualifiers`). For non-const
+    // params the cast is a no-op the compiler folds away.
     for (const auto &p : f.ParamsList)
     {
         const bool isOut       = (p.Flags & CPF_OutParm) != 0;
@@ -1866,7 +1858,7 @@ static void EmitUFunctionBody(BufferFmt &buf,
             buf.append("    memcpy(Parms.{}, {}, sizeof({}) * 0x{:X});\n",
                        p.Name, p.Name, p.Type, p.ArrayDim);
         else
-            buf.append("    Parms.{} = {};\n", p.Name, p.Name);
+            buf.append("    Parms.{} = ({}){};\n", p.Name, qualifyType(p.Type), p.Name);
     }
 
     // Dispatch. Static path goes through GetDefaultObj() — DEFINE_UE_CLASS_HELPERS
@@ -1905,14 +1897,15 @@ static void EmitUFunctionBody(BufferFmt &buf,
 // ============================================================================
 static void EmitPackageFunctionBodies(BufferFmt &buf,
                                       const UE_UPackage &pkg,
-                                      bool emitInline)
+                                      bool emitInline,
+                                      const std::unordered_map<std::string, std::string> &enumUnderlying)
 {
     for (const auto &c : pkg.Classes)
     {
         if (c.Functions.empty()) continue;
         buf.append("// ---- {}::* ----\n", c.CppNameOnly);
         for (const auto &f : c.Functions)
-            EmitUFunctionBody(buf, f, emitInline);
+            EmitUFunctionBody(buf, f, emitInline, enumUnderlying);
     }
 }
 
@@ -1972,6 +1965,7 @@ static void EmitSDKCoreFiles(
     const UE_UPackage& corePkg,
     int processEventIndex,
     bool casePreserving,
+    const std::unordered_map<std::string, std::string>& enumUnderlying,
     std::unordered_map<std::string, BufferFmt>& outBuffersMap)
 {
     // ---- 1. UECore companions (verbatim embed) -------------------------
@@ -2062,7 +2056,7 @@ static void EmitSDKCoreFiles(
         buf.append("namespace SDK\n{{\n\n");
         EmitSDKFunctionsCppBodies(buf);
         EmitUClassGetFunctionBody(buf, /*emitInline=*/false);
-        EmitPackageFunctionBodies(buf, corePkg, /*emitInline=*/false);
+        EmitPackageFunctionBodies(buf, corePkg, /*emitInline=*/false, enumUnderlying);
         buf.append("}} // namespace SDK\n");
     }
 }
@@ -2165,7 +2159,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
     aioBufferFmt.append("#include <cstring>\n\n");
     EmitUClassGetFunctionBody(aioBufferFmt, /*emitInline=*/true);
     for (size_t pkgIdx : _sdkPkgOrder)
-        EmitPackageFunctionBodies(aioBufferFmt, _sdkProcessed[pkgIdx], /*emitInline=*/true);
+        EmitPackageFunctionBodies(aioBufferFmt, _sdkProcessed[pkgIdx], /*emitInline=*/true, _sdkEnumUnderlying);
     aioBufferFmt.append("#endif // AIOHeader_FUNCTION_BODIES_DEFINED\n");
 
     logsBufferFmt.append("Saved packages: {}\nSaved classes: {}\nSaved structs: {}\nSaved enums: {}\n",
@@ -2237,7 +2231,7 @@ void UEDumper::DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<s
         _profile && _profile->GetUEVars() && _profile->GetUEVars()->GetOffsets()
             ? _profile->GetUEVars()->GetOffsets()->Config.isUsingCasePreservingName
             : false;
-    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, casePreserving, outBuffersMap);
+    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, casePreserving, _sdkEnumUnderlying, outBuffersMap);
 
     // ---- 2. Per-package: Packages/<pkg>.hpp for every non-CoreUObject pkg ---
     size_t nonCorePkgCount = 0;
@@ -2254,38 +2248,48 @@ void UEDumper::DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<s
         buf.append("#include \"../CoreUObject_classes.hpp\"\n");
 
         // Cross-pkg dep emission strategy:
-        //   FullDeps    -> #include source pkg's .hpp. FullDeps form a DAG
-        //                  (Phase 3 tops-sorts on them), so no #include
-        //                  cycles.
-        //   ForwardDeps -> emit `struct X;` forward decl in this pkg's
-        //                  namespace SDK. Does NOT trigger #include because
-        //                  ForwardDeps frequently form cycles (UE Engine
-        //                  forward-references UMG, UMG forward-references
-        //                  Engine), and #include + #pragma once + cycles
-        //                  produces partial-header inclusion bugs.
-        //   Enums in ForwardDeps were promoted to FullDeps in Phase 2.5 —
-        //   a `struct EFoo;` forward decl is invalid for an `enum class`
-        //   and even if we emitted `enum class EFoo : uint8_t;` we'd need
-        //   the underlying type at the use site.
+        //   FullDeps (struct/class) -> #include source pkg's .hpp. FullDeps
+        //                              form a DAG on struct/class types
+        //                              (Phase 3 tops-sorts on them).
+        //   FullDeps (enum)         -> `enum class EFoo : ut;` forward decl.
+        //                              Always — even when usage is by-value,
+        //                              an opaque-enum-declaration with the
+        //                              underlying type is enough to size a
+        //                              member field. Enum FullDeps cycle in
+        //                              practice (e.g. GPGameInput's enum
+        //                              referenced from GPGlobalDefines and
+        //                              vice versa), so we MUST avoid the
+        //                              #include path for enums.
+        //   ForwardDeps (struct)    -> `struct EFoo;` forward decl. Same
+        //                              cycle-avoidance reason as enum
+        //                              FullDeps (UE Engine <-> UMG etc).
+        //   ForwardDeps (enum)      -> `enum class EFoo : ut;` forward decl.
         std::set<std::string> depPkgs;
         std::set<std::string> crossPkgFwdDecls;
+        auto recordFwdDecl = [&](const std::string &dep, size_t depPkgIdx) {
+            if (depPkgIdx == pkgIdx) return;            // same-pkg fwd block
+            if (depPkgIdx == coreIdx) return;            // pulled via CoreUObject_classes
+            crossPkgFwdDecls.insert(dep);
+        };
         auto collect = [&](const UE_UPackage::Struct &s) {
             for (const auto &dep : s.FullDeps)
             {
                 auto it = _sdkNameToPkg.find(dep);
                 if (it == _sdkNameToPkg.end()) continue;
+                if (_sdkEnumUnderlying.count(dep))
+                {
+                    recordFwdDecl(dep, it->second);
+                    continue;
+                }
                 if (it->second == pkgIdx) continue;
-                if (it->second == coreIdx) continue; // pulled via CoreUObject_classes
+                if (it->second == coreIdx) continue;
                 depPkgs.insert(_sdkProcessed[it->second].PackageName);
             }
             for (const auto &dep : s.ForwardDeps)
             {
                 auto it = _sdkNameToPkg.find(dep);
                 if (it == _sdkNameToPkg.end()) continue;
-                if (it->second == pkgIdx) continue;        // covered by same-pkg fwd block
-                if (it->second == coreIdx) continue;        // CoreUObject types already complete
-                if (_sdkEnumNames.count(dep)) continue;     // enums were promoted to FullDeps
-                crossPkgFwdDecls.insert(dep);
+                recordFwdDecl(dep, it->second);
             }
         };
         for (const auto &s : pkg.Structures) collect(s);
@@ -2299,16 +2303,23 @@ void UEDumper::DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<s
                    pkg.PackageName, pkg.Enums.size(), pkg.Structures.size(), pkg.Classes.size());
 
         // Forward decl block. Covers:
-        //   (a) Same-package types — needed because struct/class definitions
-        //       within this file are output in topological order on FullDeps,
-        //       but pointer/handle wrapper refs from earlier defs to later
-        //       defs would otherwise see "unknown type name".
-        //   (b) Cross-package pointer-only refs — a forward decl is enough,
-        //       and avoids #include cycles (see strategy comment above).
+        //   (a) Same-package struct/class — within-file refs through
+        //       pointer/handle wrappers across topo-sorted definition order.
+        //   (b) Cross-package struct/class pointer-only refs — avoids
+        //       #include cycles.
+        //   (c) Cross-package enum refs (any usage) — emitted with their
+        //       underlying type so the consumer can use them as sized
+        //       member fields without #including the defining pkg.
         if (!pkg.Structures.empty() || !pkg.Classes.empty() || !crossPkgFwdDecls.empty())
         {
             for (const auto &n : crossPkgFwdDecls)
-                buf.append("struct {};\n", n);
+            {
+                auto eit = _sdkEnumUnderlying.find(n);
+                if (eit != _sdkEnumUnderlying.end())
+                    buf.append("enum class {} : {};\n", n, eit->second);
+                else
+                    buf.append("struct {};\n", n);
+            }
             for (const auto &s : pkg.Structures)
                 buf.append("struct {};\n", s.CppNameOnly);
             for (const auto &c : pkg.Classes)
@@ -2359,7 +2370,7 @@ void UEDumper::DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<s
             fbuf.append("#include \"{}.hpp\"\n", dp);
         fbuf.append("#include <cstring> // memcpy for ArrayDim>1 param marshalling\n\n");
         fbuf.append("namespace SDK\n{{\n\n");
-        EmitPackageFunctionBodies(fbuf, pkg, /*emitInline=*/true);
+        EmitPackageFunctionBodies(fbuf, pkg, /*emitInline=*/true, _sdkEnumUnderlying);
         fbuf.append("}} // namespace SDK\n");
     }
 
@@ -2432,7 +2443,7 @@ void UEDumper::DumpSDK_UECoreStyle(BufferFmt &logsBufferFmt, std::unordered_map<
         _profile && _profile->GetUEVars() && _profile->GetUEVars()->GetOffsets()
             ? _profile->GetUEVars()->GetOffsets()->Config.isUsingCasePreservingName
             : false;
-    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, casePreserving, outBuffersMap);
+    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, casePreserving, _sdkEnumUnderlying, outBuffersMap);
 
     // 8th: SDK.hpp single-include entry.
     {

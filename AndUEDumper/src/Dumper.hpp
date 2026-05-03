@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "UE/UEGameProfile.hpp"
@@ -52,7 +51,11 @@ private:
     // DumpSDK_UECoreStyle. Cleared at the top of each Dump().
     std::vector<UE_UPackage> _sdkProcessed;
     std::unordered_map<std::string, size_t> _sdkNameToPkg;
-    std::unordered_set<std::string> _sdkEnumNames;
+    // name -> "uint8_t"/"uint16_t"/... so cross-pkg enum refs can be emitted
+    // as `enum class EFoo : <ut>;` forward decls instead of #including the
+    // defining package (which formed cycles between e.g. GPGameInput and
+    // GPGlobalDefines, each ref'ing an enum from the other).
+    std::unordered_map<std::string, std::string> _sdkEnumUnderlying;
     std::vector<size_t> _sdkPkgOrder;
     std::set<std::string> _sdkPhantomEnums;
     std::set<std::string> _sdkPhantomStructs;
