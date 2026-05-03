@@ -720,6 +720,22 @@ static_assert(sizeof(FScriptDelegate) == 0x000010, "Wrong size on FScriptDelegat
 static_assert(offsetof(FScriptDelegate, Object) == 0x000000, "Member 'FScriptDelegate::Object' has a wrong offset!");
 static_assert(offsetof(FScriptDelegate, FunctionName) == 0x000008, "Member 'FScriptDelegate::FunctionName' has a wrong offset!");
 
+// Predefined delegate placeholder structs. The dumper synthesizes these
+// names from FProperty kinds in per-package SDK output (e.g. dumped fields
+// like `struct FMulticastInlineDelegate OnFoo;`); UE itself does not expose
+// them as publicly-named types. Sizes mirror the FProperty ElementSize the
+// dumper emits for each kind so the surrounding struct layout stays
+// byte-correct. Listed in kBuiltinIdents in UPackageGenerator.cpp so they
+// don't appear in dep tracking.
+struct FDelegate                 { uint8 _opaque[0x10]; };
+struct FMulticastDelegate        { uint8 _opaque[0x10]; };
+struct FMulticastInlineDelegate  { uint8 _opaque[0x10]; };
+struct FMulticastSparseDelegate  { uint8 _opaque[0x01]; };
+static_assert(sizeof(FDelegate)                 == 0x10, "Wrong size on FDelegate");
+static_assert(sizeof(FMulticastDelegate)        == 0x10, "Wrong size on FMulticastDelegate");
+static_assert(sizeof(FMulticastInlineDelegate)  == 0x10, "Wrong size on FMulticastInlineDelegate");
+static_assert(sizeof(FMulticastSparseDelegate)  == 0x01, "Wrong size on FMulticastSparseDelegate");
+
 // Predefined struct TDelegate
 // 0x0028 (0x0028 - 0x0000)
 template<typename FunctionSignature>
