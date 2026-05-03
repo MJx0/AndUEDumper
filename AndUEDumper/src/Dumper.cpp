@@ -346,309 +346,6 @@ void UEDumper::GatherUObjects(BufferFmt &logsBufferFmt, BufferFmt &objsBufferFmt
     logsBufferFmt.append("==========================\n");
 }
 
-// Self-contained preamble with minimal layout-correct stubs for the predefined
-// UE types that the dumper references in member type strings (FName, FString,
-// containers, smart pointers, delegates, etc.). Sizes match what the dumper
-// itself reports in the AIOHeader (// 0xX(0xY) comments).
-//
-// Guarded by AIOHeader_BASIC_TYPES_DEFINED so callers that already provide
-// their own definitions (e.g. UECore in this project) can opt out by
-// #defining the guard before including AIOHeader.hpp.
-static const char *kAIOPreamble = R"AIOPRE(
-#ifndef AIOHeader_BASIC_TYPES_DEFINED
-#define AIOHeader_BASIC_TYPES_DEFINED
-
-// Placeholders the dumper emits when an inner type couldn't be resolved.
-// Kept incomplete on purpose — only valid through pointer/template usage.
-struct None;
-struct FNone;
-
-template <typename T>
-struct TArray
-{
-    T* Data;
-    int32_t NumElements;
-    int32_t MaxElements;
-};
-
-struct FString : TArray<wchar_t> {};
-
-// FName matches UECore Basic.h's layout (8 bytes: ComparisonIndex + Number).
-// s_NameResolver is the FName -> ANSI string hook the user wires once at
-// startup — required because some games encrypt the FName pool, so the
-// translation can't be baked at dump time. ToString() also strips the
-// outer-package path component (so "Engine.Actor" becomes "Actor"),
-// matching UECore's GetName() semantics.
-class FName final
-{
-public:
-    static inline std::function<std::string(int32_t)> s_NameResolver;
-
-// `bWITH_CASE_PRESERVING_NAME` is patched at dump time based on the
-// game profile's Config.isUsingCasePreservingName. When false, the FName
-// is 8 bytes (ComparisonIndex/DisplayIndex aliased via union); when
-// true, it's 12 bytes with both fields stored separately.
-#define bWITH_CASE_PRESERVING_NAME false
-#if !bWITH_CASE_PRESERVING_NAME
-    union {
-#endif
-        int32_t ComparisonIndex;
-        int32_t DisplayIndex;
-#if !bWITH_CASE_PRESERVING_NAME
-    };
-#endif
-    uint32_t Number;
-
-    static std::string GetPlainANSIString(const FName* N)
-    {
-        if (s_NameResolver) return s_NameResolver(N->ComparisonIndex);
-        return {};
-    }
-    std::string GetRawString() const { return GetPlainANSIString(this); }
-    std::string ToString() const
-    {
-        std::string s = GetRawString();
-        size_t pos = s.rfind('/');
-        return pos == std::string::npos ? s : s.substr(pos + 1);
-    }
-    bool operator==(const FName& O) const
-    { return ComparisonIndex == O.ComparisonIndex && Number == O.Number; }
-    bool operator!=(const FName& O) const { return !(*this == O); }
-};
-
-// Forward decl — UObject defined later by the dumper but referenced from
-// FUObjectItem / TUObjectArray below.
-struct UObject;
-
-// Per-slot record in the GObjects table. Object pointer at offset 0;
-// the rest is engine bookkeeping (flags, cluster index, ...).
-struct FUObjectItem
-{
-    UObject* Object;
-    uint8_t Pad_8[0x10];
-};
-
-// Chunked global object array. Layout matches UE 4.20+ TUObjectArray.
-// NumElementsPerChunk = 0 disables chunking (older UE / non-chunked
-// builds); set it to 65536 (the modern default) at runtime if needed.
-class TUObjectArray
-{
-public:
-    int32_t NumElementsPerChunk = 0x10000; // 65536
-    FUObjectItem** Objects;
-    uint8_t Pad_8[0x8];
-    int32_t MaxElements;
-    int32_t NumElements;
-    int32_t MaxChunks;
-    int32_t NumChunks;
-
-    inline int32_t Num() const { return NumElements; }
-
-    inline UObject* GetByIndex(const int32_t Index) const
-    {
-        if (Index < 0 || Index >= NumElements || !Objects)
-            return nullptr;
-        // Object is at offset 0 of FUObjectItem.
-        if (NumElementsPerChunk <= 0)
-        {
-            return *reinterpret_cast<UObject**>(
-                reinterpret_cast<uintptr_t>(Objects) + Index * sizeof(FUObjectItem));
-        }
-        const int32_t ChunkIndex = Index / NumElementsPerChunk;
-        const int32_t WithinChunkIndex = Index % NumElementsPerChunk;
-        uintptr_t chunk = *reinterpret_cast<uintptr_t*>(Objects + ChunkIndex);
-        if (!chunk) return nullptr;
-        return *reinterpret_cast<UObject**>(
-            chunk + WithinChunkIndex * sizeof(FUObjectItem));
-    }
-};
-
-// Late-binding pointer wrapper: user code only knows the address of
-// GUObjectArray after dlopen + offset resolution, so GObjects holds a
-// void* and lazily reinterprets it as a TUObjectArray*. Wire via
-// `UObject::GObjects.InitManually(addr)` once at startup.
-class TUObjectArrayWrapper
-{
-private:
-    void* GObjectsAddress = nullptr;
-public:
-    inline void InitManually(void* Addr) { GObjectsAddress = Addr; }
-    inline TUObjectArray* operator->()
-    { return reinterpret_cast<TUObjectArray*>(GObjectsAddress); }
-    inline const TUObjectArray* operator->() const
-    { return reinterpret_cast<const TUObjectArray*>(GObjectsAddress); }
-    inline operator bool() const { return GObjectsAddress != nullptr; }
-};
-
-struct FText
-{
-    uint8_t Pad_0[24];
-};
-
-template <typename K, typename V>
-struct TPair
-{
-    K Key;
-    V Value;
-};
-
-template <typename K, typename V>
-struct TMap
-{
-    uint8_t Pad_0[80];
-};
-
-template <typename T>
-struct TSet
-{
-    uint8_t Pad_0[80];
-};
-
-struct FWeakObjectPtr
-{
-    int32_t ObjectIndex;
-    int32_t ObjectSerialNumber;
-};
-
-template <typename T>
-struct TWeakObjectPtr : FWeakObjectPtr {};
-
-struct FUniqueObjectGuid
-{
-    uint32_t A, B, C, D;
-};
-
-template <typename T>
-struct TLazyObjectPtr
-{
-    FWeakObjectPtr WeakPtr;
-    int32_t TagAtLastTest;
-    FUniqueObjectGuid ObjectID;
-};
-
-// FSoftObjectPath is emitted by the dump itself (CoreUObject.SoftObjectPath)
-// — its layout depends on FName size, which varies per game. We opaque-ify
-// FSoftObjectPtr here so it doesn't need a complete FSoftObjectPath at
-// preamble-emission time. Size pinned at 40 to match TSoftObjectPtr<T>
-// observed in dumps.
-struct FSoftObjectPtr
-{
-    uint8_t Pad_0[40];
-};
-
-template <typename T>
-struct TSoftObjectPtr : FSoftObjectPtr {};
-
-template <typename T>
-struct TSoftClassPtr : FSoftObjectPtr {};
-
-template <typename T>
-struct TSubclassOf
-{
-    void* ClassPtr;
-};
-
-struct FScriptInterface
-{
-    void* ObjectPointer;
-    void* InterfacePointer;
-};
-
-template <typename T>
-struct TScriptInterface : FScriptInterface {};
-
-struct FFieldClass
-{
-    uint8_t Pad_0[40];
-};
-
-struct FProperty
-{
-    uint8_t Pad_0[136];
-};
-
-struct FFieldPath
-{
-    void* ResolvedField;
-    TWeakObjectPtr<void> ResolvedOwner;
-    TArray<FName> Path;
-};
-
-template <typename T>
-struct TFieldPath : FFieldPath {};
-
-struct FScriptDelegate
-{
-    FWeakObjectPtr Object;
-    FName FunctionName;
-};
-
-struct FDelegate
-{
-    FScriptDelegate BoundFunction;
-};
-
-struct FMulticastInlineDelegate
-{
-    TArray<FScriptDelegate> InvocationList;
-};
-
-struct FMulticastDelegate
-{
-    TArray<FScriptDelegate> InvocationList;
-};
-
-struct FMulticastSparseDelegate
-{
-    void* SparseInvocationList;
-    uint8_t Pad_8[8];
-};
-
-// Forward decl with explicit underlying type. Phase 1.6 emits
-// `EClassCastFlags CastFlags` on UClass; the forward decl is enough for
-// the member declaration and for static_cast<uint64_t>(flags) inside
-// helper bodies. For the actual flag *values*, include AIOMeta.hpp
-// alongside this header (it provides the full enum class).
-enum class EClassCastFlags : uint64_t;
-
-// Compile-time string literal usable as a non-type template parameter
-// (C++20 structural literal type). Backs the
-// `DEFINE_UE_CLASS_HELPERS(T, "Name")` macro and the StaticClassImpl<>
-// dispatcher below.
-template<int Len>
-struct StringLiteral
-{
-    char Chars[Len];
-    consteval StringLiteral(const char(&S)[Len])
-    {
-        for (int i = 0; i < Len; ++i) Chars[i] = S[i];
-    }
-};
-
-// Per-class static helpers wired by DEFINE_UE_CLASS_HELPERS. Definitions
-// live in the AIOCore helpers block emitted at the bottom of this header
-// — they call AIOCore::g_FindClassByName / read UClass::DefaultObject.
-struct UClass; // declared by the dumper later in this header
-struct UObject;
-template<StringLiteral Name>
-inline struct UClass* StaticClassImpl();
-
-template<typename T>
-inline T* GetDefaultObjImpl();
-
-#define DEFINE_UE_CLASS_HELPERS(FullClassName, ClassNameStr) \
-    static struct UClass* StaticClass() { return StaticClassImpl<ClassNameStr>(); } \
-    static struct FullClassName* GetDefaultObj() { return GetDefaultObjImpl<FullClassName>(); }
-
-// AIOCore namespace exists for the kProcessEventIndex constant emitted
-// by the helpers block at the bottom of the header. The other runtime
-// glue is on the types themselves: FName::s_NameResolver (FName decode,
-// game-specific because some pool layouts are encrypted) and
-// UObject::GObjects (wire via InitManually(GUObjectArray address)).
-// Both wired once from your bridge.
-
-#endif // AIOHeader_BASIC_TYPES_DEFINED
-)AIOPRE";
 
 // Topological sort using DFS — produces a "deps first" ordering. For nodes
 // with cycles, we emit them in the order DFS encountered them (this keeps
@@ -689,8 +386,6 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
     _sdkNameToPkg.clear();
     _sdkEnumUnderlying.clear();
     _sdkPkgOrder.clear();
-    _sdkPhantomEnums.clear();
-    _sdkPhantomStructs.clear();
     _sdkPackagesUnsaved.clear();
 
     SimpleProgressBar dumpProgress(int(packages.size()));
@@ -866,10 +561,9 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
             }
             else if (cppName == "UClass")
             {
-                // EClassCastFlags is forward-declared in kAIOPreamble with
-                // explicit uint64 underlying type, so the member declaration
-                // compiles standalone. For Plan B (namespace SDK), the
-                // embedded UECore Basic.h provides the full definition.
+                // EClassCastFlags is provided by the embedded UECore Basic.h
+                // (namespace SDK, explicit uint64 underlying type), so the
+                // member declaration compiles standalone in SDK_A.
                 add(offs.UClass.CastFlags,     8, "EClassCastFlags", "CastFlags");
                 add(offs.UClass.DefaultObject, 8, "struct UObject*", "DefaultObject");
             }
@@ -953,11 +647,10 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
                 // lookup (FindObject*, FindClass*) walks GObjects directly
                 // — wire via UObject::GObjects.InitManually(addr) once.
                 //
-                // EClassCastFlags is forward-declared in kAIOPreamble with
-                // an explicit uint64_t underlying type — that's enough for
-                // function signatures and `EClassCastFlags{}` default args.
-                // Include AIOMeta.hpp alongside this header to get the
-                // actual flag enumerators (e.g. EClassCastFlags::Actor).
+                // EClassCastFlags is provided by the embedded UECore Basic.h
+                // (full enum class with explicit uint64 underlying type), so
+                // the member declaration plus `EClassCastFlags{}` default
+                // arg both work standalone in SDK_A.
                 s.ExtraDecls =
                     "\t// === AIO Core helpers (inline bodies at end of header) ===\n"
                     "\tstatic inline class TUObjectArrayWrapper GObjects;\n"
@@ -1249,49 +942,6 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
         });
     }
 
-    // ---- Compute phantom forward declarations -------------------------------
-    //
-    // Type names referenced in member / function signatures but not defined as
-    // a dumped struct/enum (typically partially-resolved property kinds) end
-    // up here. Forward decls keep pointer / template / signature usages
-    // compilable.
-    {
-        static const std::unordered_set<std::string> kPreambleNames = {
-            "FName", "FString", "FText",
-            "FWeakObjectPtr", "FUniqueObjectGuid", "FSoftObjectPtr",
-            "FScriptInterface", "FFieldPath", "FFieldClass", "FProperty",
-            "FScriptDelegate", "FDelegate",
-            "FMulticastInlineDelegate", "FMulticastDelegate", "FMulticastSparseDelegate",
-            "TArray", "TMap", "TSet", "TPair",
-            "TWeakObjectPtr", "TLazyObjectPtr",
-            "TSoftObjectPtr", "TSoftClassPtr",
-            "TSubclassOf", "TScriptInterface", "TFieldPath",
-            "None", "FNone",
-        };
-        auto considerName = [&](const std::string &name)
-        {
-            if (name.empty()) return;
-            if (kPreambleNames.count(name)) return;
-            if (_sdkNameToPkg.count(name)) return;
-            if (name.size() < 2 || !std::isupper(static_cast<unsigned char>(name[0])))
-                return;
-            const char prefix = name[0];
-            if (prefix == 'E')
-                _sdkPhantomEnums.insert(name);
-            else
-                _sdkPhantomStructs.insert(name);
-        };
-        for (const auto &p : _sdkProcessed)
-        {
-            auto walk = [&](const UE_UPackage::Struct &s)
-            {
-                for (const auto &n : s.FullDeps)    considerName(n);
-                for (const auto &n : s.ForwardDeps) considerName(n);
-            };
-            for (const auto &s : p.Structures) walk(s);
-            for (const auto &c : p.Classes)    walk(c);
-        }
-    }
 
     // ---- Intra-package topological sort on structs / classes ----------------
     //
@@ -1373,204 +1023,6 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
     }
 }
 
-// ============================================================================
-//  AIOCore helper block — emitted at the end of headers that contain
-//  UObject's full definition. The augmenter (Phase 1.6) injected a matching
-//  declaration on UObject; the inline body below dispatches through
-//  vtable[ProcessEventIndex].
-// ============================================================================
-// emitTemplates: include StaticClassImpl<>/GetDefaultObjImpl<> definitions.
-// Plan A and AIOHeader want them (the preamble only forward-declared the
-// templates). Plan B sets this false — embedded UECore Basic.h ships its
-// own StaticClassImpl<> chained through BasicFilesImpleUtils, so emitting
-// ours would cause a duplicate definition.
-static void EmitAIOCoreHelpersBlock(BufferFmt &buf, int processEventIndex,
-                                    bool emitTemplates = true)
-{
-    buf.append("\n// === AIO Core Helpers ===\n");
-    buf.append("// Generated runtime glue tying the dumped UE reflection layout to\n");
-    buf.append("// per-game offsets discovered during the dump.\n");
-    buf.append("//\n");
-    buf.append("// Wire two things from your bridge once at startup:\n");
-    buf.append("{}", "//   FName::s_NameResolver = [](int32_t idx){ return ResolveByID(idx); };\n");
-    buf.append("//   UObject::GObjects.InitManually(GUObjectArrayPtr);\n");
-    buf.append("// Everything else (ProcessEvent dispatch, FindObject walks, type\n");
-    buf.append("// queries) is fully derived from the dumped layout + per-game\n");
-    buf.append("// offsets — no other hooks needed.\n\n");
-    buf.append("#ifndef AIOHeader_CORE_HELPERS_DEFINED\n");
-    buf.append("#define AIOHeader_CORE_HELPERS_DEFINED\n\n");
-
-    // ProcessEventIndex constant — only piece that needs interpolation.
-    buf.append("namespace AIOCore\n{{\n");
-    buf.append("    // Vtable slot of UObject::ProcessEvent in the target image.\n");
-    buf.append("    // Discovered during dumping; override by #define-ing\n");
-    buf.append("    // AIOCORE_PROCESS_EVENT_INDEX before #include if you need to\n");
-    buf.append("    // swap it for a custom build.\n");
-    buf.append("    #ifdef AIOCORE_PROCESS_EVENT_INDEX\n");
-    buf.append("    constexpr int kProcessEventIndex = AIOCORE_PROCESS_EVENT_INDEX;\n");
-    buf.append("    #else\n");
-    buf.append("    constexpr int kProcessEventIndex = {};\n", processEventIndex);
-    buf.append("    #endif\n");
-    buf.append("}}\n\n");
-
-    // Bodies are emitted via a single {} interpolation so we can keep the
-    // raw-string verbatim — {{/}} aren't fmt-escapes here. References to
-    // EClassCastFlags use brace-init (`EClassCastFlags{0x20}`) which is
-    // valid against the forward-decl with fixed underlying type in the
-    // preamble; for the actual flag enumerators include AIOMeta.hpp.
-    buf.append("{}", R"AIOIMPL(// ---- ProcessEvent --------------------------------------------------
-inline void UObject::ProcessEvent(struct UFunction* Function, void* Parms) const
-{
-    using FN = void(*)(const UObject*, struct UFunction*, void*);
-    auto vtbl = *reinterpret_cast<void* const* const*>(this);
-    reinterpret_cast<FN>(vtbl[AIOCore::kProcessEventIndex])(this, Function, Parms);
-}
-
-// ---- Name helpers --------------------------------------------------
-inline std::string UObject::GetName() const
-{
-    return NamePrivate.ToString();
-}
-
-inline std::string UObject::GetFullName() const
-{
-    if (!ClassPrivate) return "None";
-    std::string Outers;
-    for (UObject* o = OuterPrivate; o; o = o->OuterPrivate)
-        Outers = o->GetName() + "." + Outers;
-    std::string r = ClassPrivate->GetName();
-    r += " ";
-    r += Outers;
-    r += GetName();
-    return r;
-}
-
-// ---- Type queries --------------------------------------------------
-// HasTypeFlag / IsA(EClassCastFlags) read UClass::CastFlags — typed by
-// Phase 1.6 augmenter from per-game UE_Offsets::UClass.CastFlags.
-inline bool UObject::HasTypeFlag(EClassCastFlags TypeFlags) const
-{
-    if (!ClassPrivate) return false;
-    auto bits = static_cast<uint64_t>(TypeFlags);
-    if (bits == 0) return true; // EClassCastFlags::None
-    return (static_cast<uint64_t>(ClassPrivate->CastFlags) & bits) != 0;
-}
-
-inline bool UObject::IsA(EClassCastFlags TypeFlags) const
-{
-    return HasTypeFlag(TypeFlags);
-}
-
-inline bool UObject::IsA(struct UClass* cmp) const
-{
-    if (!cmp || !ClassPrivate) return false;
-    // Walk the SuperStruct chain of our class. UClass inherits from UStruct,
-    // so we can compare UStruct* to UClass* directly via implicit upcast.
-    for (const struct UStruct* s = ClassPrivate; s; s = s->SuperStruct)
-    {
-        if (s == cmp) return true;
-    }
-    return false;
-}
-
-inline bool UObject::IsDefaultObject() const
-{
-    // EObjectFlags::ClassDefaultObject = 0x10
-    return (ObjectFlags & 0x10u) != 0;
-}
-
-inline void UObject::TraverseSupers(const std::function<bool(const UObject*)>& Callback) const
-{
-    // If `this` is itself a UClass (has Class type-flag), walk from it;
-    // otherwise walk from our class's SuperStruct chain.
-    const struct UStruct* Clss = nullptr;
-    if (HasTypeFlag(EClassCastFlags{0x20})) // EClassCastFlags::Class
-        Clss = static_cast<const struct UStruct*>(static_cast<const UClass*>(static_cast<const UObject*>(this)));
-    else if (ClassPrivate)
-        Clss = ClassPrivate;
-    while (Clss)
-    {
-        if (!Callback(Clss)) break;
-        Clss = Clss->SuperStruct;
-    }
-}
-
-// ---- Object lookup --------------------------------------------------
-// Walks GObjects directly — same structure as Dumper-7's UECore reference
-// (CoreUObject_functions.cpp). Requires UObject::GObjects to be wired.
-inline UObject* UObject::FindObjectImpl(const std::string& FullName, EClassCastFlags RequiredType)
-{
-    if (!GObjects) return nullptr;
-    const int32_t N = GObjects->Num();
-    for (int32_t i = 0; i < N; ++i)
-    {
-        UObject* Object = GObjects->GetByIndex(i);
-        if (!Object || (reinterpret_cast<uintptr_t>(Object) & 0x7) != 0)
-            continue;
-        if (Object->HasTypeFlag(RequiredType) && Object->GetFullName() == FullName)
-            return Object;
-    }
-    return nullptr;
-}
-
-inline UObject* UObject::FindObjectFastImpl(const std::string& Name, EClassCastFlags RequiredType)
-{
-    if (!GObjects) return nullptr;
-    const int32_t N = GObjects->Num();
-    for (int32_t i = 0; i < N; ++i)
-    {
-        UObject* Object = GObjects->GetByIndex(i);
-        if (!Object) continue;
-        if (Object->HasTypeFlag(RequiredType) && Object->GetName() == Name)
-            return Object;
-    }
-    return nullptr;
-}
-
-inline UClass* UObject::FindClass(const std::string& ClassFullName)
-{
-    return FindObject<UClass>(ClassFullName, EClassCastFlags{0x20}); // ::Class
-}
-
-inline UClass* UObject::FindClassFast(const std::string& ClassName)
-{
-    return FindObjectFast<UClass>(ClassName, EClassCastFlags{0x20}); // ::Class
-}
-
-)AIOIMPL");
-
-    if (emitTemplates)
-    {
-        buf.append("{}", R"AIOTPL(// ---- StaticClassImpl<> / GetDefaultObjImpl<> templates -------------
-// Forward-declared in the preamble; full definitions here so the
-// DEFINE_UE_CLASS_HELPERS macro instantiations resolve when user code
-// pulls in this header. Caches the resolved UClass* per template
-// instantiation (one static per (FullClassName, ClassNameStr) pair).
-template<StringLiteral Name>
-inline UClass* StaticClassImpl()
-{
-    static UClass* Cached = nullptr;
-    if (!Cached)
-    {
-        Cached = UObject::FindObjectFast<UClass>(
-            std::string(static_cast<const char*>(Name.Chars)),
-            EClassCastFlags{0x20}); // ::Class
-    }
-    return Cached;
-}
-
-template<typename T>
-inline T* GetDefaultObjImpl()
-{
-    UClass* C = T::StaticClass();
-    return C ? reinterpret_cast<T*>(C->DefaultObject) : nullptr;
-}
-
-)AIOTPL");
-    }
-
-    buf.append("#endif // AIOHeader_CORE_HELPERS_DEFINED\n");
-}
 
 // ============================================================================
 //  SDK CoreUObject_classes.hpp tail — minimal helper block.
@@ -2081,20 +1533,21 @@ static void EmitSDKCoreFiles(
 }
 
 // ============================================================================
-//  DumpAIOHeader — single monolithic header containing every dumped type.
+//  DumpAIOHeader — browse-only types dump.
+//
+//  Dumps every UE enum / struct / class definition into one file, wrapped in
+//  `namespace SDK`. NOT a compilation entry point: there's no preamble for
+//  TArray/FName/FString/etc., no inline ProcessEvent bodies, no AIO core
+//  helpers, no forward-decl block, no phantom-fwd-decl block. Use SDK_A/ for
+//  the buildable per-pkg split; this header is for grep / IDE jump-to-def /
+//  quick reference.
 // ============================================================================
 void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
 {
-    const bool casePreserving =
-        _profile && _profile->GetUEVars() && _profile->GetUEVars()->GetOffsets()
-            ? _profile->GetUEVars()->GetOffsets()->Config.isUsingCasePreservingName
-            : false;
-
     if (_sdkProcessed.empty())
     {
         aioBufferFmt.append("#pragma once\n\n");
-        aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n#include <cmath>\n\n");
-        aioBufferFmt.append("{}\n", ApplyCasePreservingDefine(kAIOPreamble, casePreserving));
+        aioBufferFmt.append("// (empty dump — no packages processed)\n");
         logsBufferFmt.append("Saved packages: 0\nSaved classes: 0\nSaved structs: 0\nSaved enums: 0\n");
         if (!_sdkPackagesUnsaved.empty())
         {
@@ -2107,36 +1560,10 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
     }
 
     aioBufferFmt.append("#pragma once\n\n");
-    aioBufferFmt.append("#include <cstdint>\n#include <string>\n#include <functional>\n#include <cmath>\n\n");
-    aioBufferFmt.append("{}\n", ApplyCasePreservingDefine(kAIOPreamble, casePreserving));
-
-    aioBufferFmt.append("// === Forward declarations ===\n\n");
-    for (const auto &p : _sdkProcessed)
-    {
-        for (const auto &e : p.Enums)
-            aioBufferFmt.append("enum class {} : {};\n", e.CppNameOnly, e.UnderlyingType);
-    }
-    aioBufferFmt.append("\n");
-    for (const auto &p : _sdkProcessed)
-    {
-        for (const auto &s : p.Structures) aioBufferFmt.append("struct {};\n", s.CppNameOnly);
-        for (const auto &c : p.Classes)    aioBufferFmt.append("struct {};\n", c.CppNameOnly);
-    }
-    aioBufferFmt.append("\n");
-
-    if (!_sdkPhantomEnums.empty() || !_sdkPhantomStructs.empty())
-    {
-        aioBufferFmt.append("// === Phantom forward declarations ===\n");
-        aioBufferFmt.append("// Type names referenced in member / function signatures but not\n");
-        aioBufferFmt.append("// defined as a dumped struct/enum (typically partially-resolved\n");
-        aioBufferFmt.append("// property kinds). Forward decls keep pointer / template /\n");
-        aioBufferFmt.append("// signature usages compilable.\n");
-        for (const auto &n : _sdkPhantomEnums)
-            aioBufferFmt.append("enum class {} : uint8_t;\n", n);
-        for (const auto &n : _sdkPhantomStructs)
-            aioBufferFmt.append("struct {};\n", n);
-        aioBufferFmt.append("\n");
-    }
+    aioBufferFmt.append("// AIOHeader.hpp — browse-only types dump. Not a compilation entry\n");
+    aioBufferFmt.append("// point. Use SDK_A/ for the buildable per-pkg split. This file\n");
+    aioBufferFmt.append("// exists for grep / IDE jump-to-def / quick reference.\n\n");
+    aioBufferFmt.append("namespace SDK\n{{\n\n");
 
     int packages_saved = 0;
     int classes_saved = 0;
@@ -2146,18 +1573,11 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
     for (size_t pkgIdx : _sdkPkgOrder)
     {
         auto &pkg = _sdkProcessed[pkgIdx];
-
         aioBufferFmt.append("// Package: {}\n// Enums: {}\n// Structs: {}\n// Classes: {}\n\n",
                             pkg.PackageName, pkg.Enums.size(), pkg.Structures.size(), pkg.Classes.size());
-
-        if (!pkg.Enums.empty())
-            UE_UPackage::AppendEnumsToBuffer(pkg.Enums, &aioBufferFmt);
-
-        if (!pkg.Structures.empty())
-            UE_UPackage::AppendStructsToBuffer(pkg.Structures, &aioBufferFmt);
-
-        if (!pkg.Classes.empty())
-            UE_UPackage::AppendStructsToBuffer(pkg.Classes, &aioBufferFmt);
+        if (!pkg.Enums.empty())      UE_UPackage::AppendEnumsToBuffer(pkg.Enums, &aioBufferFmt);
+        if (!pkg.Structures.empty()) UE_UPackage::AppendStructsToBuffer(pkg.Structures, &aioBufferFmt);
+        if (!pkg.Classes.empty())    UE_UPackage::AppendStructsToBuffer(pkg.Classes, &aioBufferFmt);
 
         packages_saved++;
         classes_saved += pkg.Classes.size();
@@ -2165,32 +1585,16 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, BufferFmt &aioBufferFmt)
         enums_saved   += pkg.Enums.size();
     }
 
-    EmitAIOCoreHelpersBlock(aioBufferFmt, _processEventIndex);
-
-    // === UFunction ProcessEvent bodies (header-only inline) =============
-    // Order matters: CoreUObject's UClass::GetFunction body comes first
-    // because every other dumped UFunction's body lookup goes through it.
-    // Wrapped in its own include guard so a TU that ends up pulling this
-    // header twice doesn't re-define everything.
-    aioBufferFmt.append("\n#ifndef AIOHeader_FUNCTION_BODIES_DEFINED\n");
-    aioBufferFmt.append("#define AIOHeader_FUNCTION_BODIES_DEFINED\n");
-    aioBufferFmt.append("// memcpy for ArrayDim>1 param marshalling.\n");
-    aioBufferFmt.append("#include <cstring>\n\n");
-    EmitUClassGetFunctionBody(aioBufferFmt, /*emitInline=*/true);
-    for (size_t pkgIdx : _sdkPkgOrder)
-        EmitPackageFunctionBodies(aioBufferFmt, _sdkProcessed[pkgIdx], /*emitInline=*/true, _sdkEnumUnderlying);
-    aioBufferFmt.append("#endif // AIOHeader_FUNCTION_BODIES_DEFINED\n");
+    aioBufferFmt.append("}} // namespace SDK\n");
 
     logsBufferFmt.append("Saved packages: {}\nSaved classes: {}\nSaved structs: {}\nSaved enums: {}\n",
                          packages_saved, classes_saved, structs_saved, enums_saved);
-
     if (!_sdkPackagesUnsaved.empty())
     {
         std::string un = _sdkPackagesUnsaved;
         un.erase(un.size() - 2);
         logsBufferFmt.append("Unsaved packages: [\n{}\n]\n", un);
     }
-
     logsBufferFmt.append("==========================\n");
 }
 

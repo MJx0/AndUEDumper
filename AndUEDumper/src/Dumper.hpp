@@ -61,8 +61,6 @@ private:
     // GPGlobalDefines, each ref'ing an enum from the other).
     std::unordered_map<std::string, std::string> _sdkEnumUnderlying;
     std::vector<size_t> _sdkPkgOrder;
-    std::set<std::string> _sdkPhantomEnums;
-    std::set<std::string> _sdkPhantomStructs;
     std::string _sdkPackagesUnsaved;
 
 public:
