@@ -957,6 +957,13 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
             "TSoftObjectPtr", "TSoftClassPtr",
             "TSubclassOf", "TScriptInterface", "TFieldPath",
             "None", "FNone",
+            // Hand-written meta enums in the embedded UECore Basic.h. Their
+            // underlying types are fixed (uint32 / uint64), and a forward
+            // decl with a guessed underlying (uint8_t) would clash with the
+            // real definition once SDK_B's CoreUObject_classes.hpp pulls
+            // Basic.h.
+            "EClassCastFlags", "EObjectFlags", "EFunctionFlags",
+            "EClassFlags", "EPropertyFlags",
         };
         auto considerName = [&](const std::string &name)
         {
@@ -1574,7 +1581,7 @@ static void EmitSDKCoreFiles(
 // ============================================================================
 //  DumpAIOHeader — single monolithic header containing every dumped type.
 // ============================================================================
-void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, std::unordered_map<std::string, BufferFmt> &outBuffersMap)
+void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, size_t coreIdx, std::unordered_map<std::string, BufferFmt> &outBuffersMap)
 {
     auto &aioBufferFmt = outBuffersMap["SDK_B/AIOHeader.hpp"];
 
@@ -1604,17 +1611,19 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, std::unordered_map<std::s
     aioBufferFmt.append("#include \"CoreUObject_classes.hpp\"\n\n");
     aioBufferFmt.append("namespace SDK\n{{\n\n");
 
-    aioBufferFmt.append("// === Forward declarations ===\n\n");
-    for (const auto &p : _sdkProcessed)
+    aioBufferFmt.append("// === Forward declarations (non-CoreUObject) ===\n\n");
+    for (size_t i = 0; i < _sdkProcessed.size(); ++i)
     {
-        for (const auto &e : p.Enums)
+        if (i == coreIdx) continue; // CoreUObject types come from CoreUObject_classes.hpp
+        for (const auto &e : _sdkProcessed[i].Enums)
             aioBufferFmt.append("enum class {} : {};\n", e.CppNameOnly, e.UnderlyingType);
     }
     aioBufferFmt.append("\n");
-    for (const auto &p : _sdkProcessed)
+    for (size_t i = 0; i < _sdkProcessed.size(); ++i)
     {
-        for (const auto &s : p.Structures) aioBufferFmt.append("struct {};\n", s.CppNameOnly);
-        for (const auto &c : p.Classes)    aioBufferFmt.append("struct {};\n", c.CppNameOnly);
+        if (i == coreIdx) continue;
+        for (const auto &s : _sdkProcessed[i].Structures) aioBufferFmt.append("struct {};\n", s.CppNameOnly);
+        for (const auto &c : _sdkProcessed[i].Classes)    aioBufferFmt.append("struct {};\n", c.CppNameOnly);
     }
     aioBufferFmt.append("\n");
 
@@ -1639,6 +1648,7 @@ void UEDumper::DumpAIOHeader(BufferFmt &logsBufferFmt, std::unordered_map<std::s
 
     for (size_t pkgIdx : _sdkPkgOrder)
     {
+        if (pkgIdx == coreIdx) continue; // skip CoreUObject — already in CoreUObject_classes.hpp
         auto &pkg = _sdkProcessed[pkgIdx];
 
         aioBufferFmt.append("// Package: {}\n// Enums: {}\n// Structs: {}\n// Classes: {}\n\n",
@@ -1979,7 +1989,7 @@ void UEDumper::DumpSDK_UECoreStyle(BufferFmt &logsBufferFmt, std::unordered_map<
     // sibling Packages/*_functions.cpp provide the out-of-line ProcessEvent
     // bodies. Each .cpp pulls AIOHeader.hpp (one shot for all types) instead
     // of a per-pkg sibling header — there is none in Plan B.
-    DumpAIOHeader(logsBufferFmt, outBuffersMap);
+    DumpAIOHeader(logsBufferFmt, coreIdx, outBuffersMap);
 
     size_t nonCorePkgCount = 0;
     for (size_t pkgIdx : _sdkPkgOrder)

@@ -101,11 +101,12 @@ private:
     // share one pass.
     void BuildProcessedPackages(UEPackagesArray &packages, const ProgressCallback &progressCallback);
 
-    // Emit AIOHeader.hpp under SDK_B/. Types-only monolith — preamble and
-    // ProcessEvent bodies have moved into the surrounding SDK_B/ split
-    // (CoreUObject_classes.hpp + per-pkg _functions.cpp). The aggregator
-    // SDK_B/SDK.hpp pulls this header alongside CoreUObject_classes.hpp.
-    void DumpAIOHeader(BufferFmt &logsBufferFmt, std::unordered_map<std::string, BufferFmt> &outBuffersMap);
+    // Emit AIOHeader.hpp under SDK_B/. Types-only monolith covering every
+    // *non-CoreUObject* package — CoreUObject types live in the sibling
+    // CoreUObject_classes.hpp / Basic.h that AIOHeader.hpp #includes, so
+    // re-emitting them here would clash on first redefinition. coreIdx is
+    // the index of the CoreUObject package in _sdkProcessed.
+    void DumpAIOHeader(BufferFmt &logsBufferFmt, size_t coreIdx, std::unordered_map<std::string, BufferFmt> &outBuffersMap);
 
     // Plan A: per-package single .hpp + Basic.hpp + SDK.hpp aggregator.
     // Inserts entries with prefixed paths (e.g. "SDK_A/Basic.hpp") into
