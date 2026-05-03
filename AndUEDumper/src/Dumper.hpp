@@ -22,11 +22,15 @@ public:
     // Which split-style SDKs to emit alongside the always-present
     // monolithic AIOHeader.hpp. Both is the default — callers that don't
     // want a specific style can call SetSDKMode before Dump().
+    // SDK output style. AIOHeader.hpp is always emitted regardless of mode;
+    // these flags only gate Plan A (SDK_A/ per-pkg split). Plan B (SDK_B/)
+    // was removed — see the comment in Dump() above the DumpSDK_PerPackage
+    // call for the rationale.
     enum class SDKMode : uint8_t {
-        Both    = 0, // SDK_A/ + SDK_B/
-        OnlyA   = 1, // SDK_A/ only
-        OnlyB   = 2, // SDK_B/ only
-        None    = 3, // skip both, AIOHeader.hpp only
+        Both    = 0, // emit SDK_A/
+        OnlyA   = 1, // emit SDK_A/
+        OnlyB   = 2, // legacy — treated as OnlyA (SDK_B is gone)
+        None    = 3, // skip SDK_A/, AIOHeader.hpp only
     };
 
 private:
@@ -47,8 +51,8 @@ private:
     SDKMode _sdkMode = SDKMode::Both;
 
     // Cached output of BuildProcessedPackages — produced once per Dump()
-    // and consumed by DumpAIOHeader / DumpSDK_PerPackage /
-    // DumpSDK_UECoreStyle. Cleared at the top of each Dump().
+    // and consumed by DumpAIOHeader / DumpSDK_PerPackage. Cleared at the
+    // top of each Dump().
     std::vector<UE_UPackage> _sdkProcessed;
     std::unordered_map<std::string, size_t> _sdkNameToPkg;
     // name -> "uint8_t"/"uint16_t"/... so cross-pkg enum refs can be emitted
@@ -108,8 +112,4 @@ private:
     // outBuffersMap.
     void DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<std::string, BufferFmt> &outBuffersMap);
 
-    // Plan B: UECore-style 4-file split per package
-    // (<pkg>_classes.hpp / _structs.hpp / _parameters.hpp / _functions.cpp)
-    // plus shared Basic.hpp + UnrealContainers.hpp + SDK.hpp aggregator.
-    void DumpSDK_UECoreStyle(BufferFmt &logsBufferFmt, std::unordered_map<std::string, BufferFmt> &outBuffersMap);
 };

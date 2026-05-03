@@ -109,11 +109,16 @@ bool UEDumper::Dump(std::unordered_map<std::string, BufferFmt> *outBuffersMap)
     BufferFmt &aioBufferFmt = outBuffersMap->at("AIOHeader.hpp");
     DumpAIOHeader(logsBufferFmt, aioBufferFmt);
 
-    if (_sdkMode == SDKMode::Both || _sdkMode == SDKMode::OnlyA)
+    // SDK_B (UECore-style) was removed — the SDK_B variant only made sense
+    // alongside an AIOHeader that didn't carry its own preamble, and that
+    // refactor caused per-TU memory blow-ups when consuming SDK_B's
+    // monolithic AIOHeader from hundreds of _functions.cpp at once. Plan A
+    // (per-pkg .hpp + .cpp) and the standalone monolithic AIOHeader.hpp
+    // cover both use cases without the cross-product cost.
+    if (_sdkMode == SDKMode::Both
+        || _sdkMode == SDKMode::OnlyA
+        || _sdkMode == SDKMode::OnlyB) // OnlyB is legacy; treated as OnlyA
         DumpSDK_PerPackage(logsBufferFmt, *outBuffersMap);
-
-    if (_sdkMode == SDKMode::Both || _sdkMode == SDKMode::OnlyB)
-        DumpSDK_UECoreStyle(logsBufferFmt, *outBuffersMap);
 
     dumper_jf_ns::base_address = _profile->GetUnrealELF().base();
     if (dumper_jf_ns::jsonFunctions.size())
@@ -2426,59 +2431,3 @@ void UEDumper::DumpSDK_PerPackage(BufferFmt &logsBufferFmt, std::unordered_map<s
     logsBufferFmt.append("==========================\n");
 }
 
-// ============================================================================
-//  DumpSDK_UECoreStyle (Plan B) — SDK_A minus the Packages/ subdirectory.
-//
-//  Emits exactly the 8 root files SDK_A also produces (UECore companions +
-//  CoreUObject 4-file split + SDK.hpp), but skips per-package files for
-//  non-CoreUObject content. Useful when you only want core reflection
-//  primitives (UObject / UClass / FName / FVector / ...) without dragging
-//  in Engine/GameplayAbilities/etc.
-// ============================================================================
-void UEDumper::DumpSDK_UECoreStyle(BufferFmt &logsBufferFmt, std::unordered_map<std::string, BufferFmt> &outBuffersMap)
-{
-    if (_sdkProcessed.empty())
-    {
-        logsBufferFmt.append("SDK Plan B: empty processed packages, skipping.\n");
-        return;
-    }
-
-    const size_t kNotFound = static_cast<size_t>(-1);
-    size_t coreIdx = kNotFound;
-    for (size_t i = 0; i < _sdkProcessed.size(); ++i)
-    {
-        if (_sdkProcessed[i].PackageName == "CoreUObject")
-        {
-            coreIdx = i;
-            break;
-        }
-    }
-    if (coreIdx == kNotFound)
-    {
-        logsBufferFmt.append("SDK Plan B: CoreUObject package not found in dump, skipping.\n");
-        return;
-    }
-
-    const std::string prefix = "SDK_B/";
-
-    // 7 of the 8 files (UECore companions + CoreUObject 4-file split).
-    const bool casePreserving =
-        _profile && _profile->GetUEVars() && _profile->GetUEVars()->GetOffsets()
-            ? _profile->GetUEVars()->GetOffsets()->Config.isUsingCasePreservingName
-            : false;
-    EmitSDKCoreFiles(prefix, _sdkProcessed[coreIdx], _processEventIndex, casePreserving, _sdkEnumUnderlying, outBuffersMap);
-
-    // 8th: SDK.hpp single-include entry.
-    {
-        auto &buf = outBuffersMap[prefix + "SDK.hpp"];
-        buf.append("#pragma once\n\n");
-        buf.append("// Single-include entry. Pulls CoreUObject_classes.hpp which\n");
-        buf.append("// transitively pulls CoreUObject_structs.hpp -> Basic.h +\n");
-        buf.append("// UnrealContainers.h. Link Basic.cpp + CoreUObject_functions.cpp\n");
-        buf.append("// into your TU(s).\n\n");
-        buf.append("#include \"CoreUObject_classes.hpp\"\n");
-    }
-
-    logsBufferFmt.append("SDK Plan B: emitted UECore companions + CoreUObject (4 files) + SDK.hpp under {}\n", prefix);
-    logsBufferFmt.append("==========================\n");
-}
