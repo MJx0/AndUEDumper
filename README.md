@@ -111,7 +111,6 @@ make clean && make
 
 ## TODO
 
-* Sort Generated Packages & Solve Dependencies
 * [Dumper-7](https://github.com/Encryqed/Dumper-7) Auto Find Offsets
 
 ## Credits & Thanks
