@@ -910,8 +910,9 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
 }
 
 
-static void EmitSDKFunctionsCppBodies(BufferFmt &buf)
+static void EmitSDKFunctionsCppBodies(BufferFmt &buf, int processEventIndex)
 {
+    buf.append("constexpr int kProcessEventIndex = {};\n\n", processEventIndex);
     buf.append("{}", R"AIOIMPL(void UObject::ProcessEvent(struct UFunction* Function, void* Parms) const
 {
     using FN = void(*)(const UObject*, struct UFunction*, void*);
@@ -950,12 +951,12 @@ class UObject* UObject::FindObjectFastImpl(const std::string& Name, EClassCastFl
 
 class UClass* UObject::FindClass(const std::string& ClassFullName)
 {
-    return FindObject<UClass>(ClassFullName, EClassCastFlags{0x20}); // ::Class
+    return FindObject<UClass>(ClassFullName, EClassCastFlags::Class);
 }
 
 class UClass* UObject::FindClassFast(const std::string& ClassName)
 {
-    return FindObjectFast<UClass>(ClassName, EClassCastFlags{0x20}); // ::Class
+    return FindObjectFast<UClass>(ClassName, EClassCastFlags::Class);
 }
 
 std::string UObject::GetName() const
@@ -1008,7 +1009,7 @@ bool UObject::IsDefaultObject() const
 void UObject::TraverseSupers(const std::function<bool(const UObject*)>& Callback) const
 {
     const struct UStruct* Clss = nullptr;
-    if (HasTypeFlag(EClassCastFlags{0x20})) // EClassCastFlags::Class
+    if (HasTypeFlag(EClassCastFlags::Class))
         Clss = static_cast<const struct UStruct*>(static_cast<const UClass*>(static_cast<const UObject*>(this)));
     else if (ClassPrivate)
         Clss = ClassPrivate;
@@ -1034,7 +1035,7 @@ static void EmitUClassGetFunctionBody(BufferFmt &buf, bool emitInline)
         "        if (Clss->GetName() != ClassName) continue;\n"
         "        for (struct UField* Field = Clss->Children; Field; Field = Field->Next)\n"
         "        {{\n"
-        "            if (Field->HasTypeFlag(EClassCastFlags{{0x80000}}) "
+        "            if (Field->HasTypeFlag(EClassCastFlags::Function) "
         "&& Field->GetName() == FuncName)\n"
         "                return static_cast<struct UFunction*>(Field);\n"
         "        }}\n"
@@ -1244,8 +1245,6 @@ static void EmitSDKCoreFiles(
         buf.append("#include \"CoreUObject_structs.hpp\"\n\n");
         buf.append("namespace SDK\n{{\n\n");
 
-        buf.append("constexpr int kProcessEventIndex = {};\n\n", processEventIndex);
-
         buf.append("// Package: CoreUObject - Classes({})\n\n", corePkg.Classes.size());
 
         if (!corePkg.Classes.empty())
@@ -1262,7 +1261,7 @@ static void EmitSDKCoreFiles(
         buf.append("#include \"CoreUObject_classes.hpp\"\n");
         buf.append("#include <cstring> // memcpy for ArrayDim>1 param marshalling\n\n");
         buf.append("namespace SDK\n{{\n\n");
-        EmitSDKFunctionsCppBodies(buf);
+        EmitSDKFunctionsCppBodies(buf, processEventIndex);
         EmitUClassGetFunctionBody(buf, /*emitInline=*/false);
         EmitPackageFunctionBodies(buf, corePkg, /*emitInline=*/false, enumUnderlying);
         buf.append("}} // namespace SDK\n");
