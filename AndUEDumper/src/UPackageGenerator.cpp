@@ -626,10 +626,29 @@ void UE_UPackage::AppendStructsToBuffer(std::vector<Struct> &arr, BufferFmt *pBu
     }
 }
 
+// Enumerator names that collide with system-header macros. Pre-undef
+// before the enum so the macro doesn't replace the identifier in the
+// emitted enumerator list. Add new entries as they show up.
+static const std::unordered_set<std::string> &kSystemMacroConflicts()
+{
+    static const std::unordered_set<std::string> s = {
+        "EM_MAX", // <bits/elf_common.h>: #define EM_MAX 102
+    };
+    return s;
+}
+
 void UE_UPackage::AppendEnumsToBuffer(std::vector<Enum> &arr, BufferFmt *pBufFmt)
 {
+    const auto &conflicts = kSystemMacroConflicts();
+
     for (auto &e : arr)
     {
+        for (const auto &m : e.Members)
+        {
+            if (conflicts.count(m.first))
+                pBufFmt->append("#ifdef {}\n#undef {}\n#endif\n", m.first, m.first);
+        }
+
         pBufFmt->append("// Object: {}\n{}\n{{", e.FullName, e.CppName);
 
         size_t lastIdx = e.Members.size() - 1;
