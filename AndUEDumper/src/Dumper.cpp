@@ -655,12 +655,7 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
                     "\t// === AIO Core helpers (out-of-line bodies in CoreUObject_functions.cpp) ===\n"
                     "\tstatic inline class TUObjectArrayWrapper GObjects;\n"
                     "\n"
-                    "\tvoid ProcessEvent(struct UFunction* Function, void* Parms) const\n"
-                    "\t{\n"
-                    "\t    using FN = void(*)(const UObject*, struct UFunction*, void*);\n"
-                    "\t    auto vtbl = *reinterpret_cast<void* const* const*>(this);\n"
-                    "\t    reinterpret_cast<FN>(vtbl[kProcessEventIndex])(this, Function, Parms);\n"
-                    "\t}\n"
+                    "\tvoid ProcessEvent(struct UFunction* Function, void* Parms) const;\n"
                     "\n"
                     "\tstd::string GetName() const;\n"
                     "\tstd::string GetFullName() const;\n"
@@ -1040,6 +1035,14 @@ static void EmitSDKFunctionsCppBodies(BufferFmt &buf)
 {
     buf.append("{}", R"AIOIMPL(// Mirrors UECore CoreUObject_functions.cpp — bodies for UObject helpers
 // declared in CoreUObject_classes.hpp.
+
+// ---- ProcessEvent dispatch -----------------------------------------
+void UObject::ProcessEvent(struct UFunction* Function, void* Parms) const
+{
+    using FN = void(*)(const UObject*, struct UFunction*, void*);
+    auto vtbl = *reinterpret_cast<void* const* const*>(this);
+    reinterpret_cast<FN>(vtbl[kProcessEventIndex])(this, Function, Parms);
+}
 
 // ---- Object lookup -------------------------------------------------
 class UObject* UObject::FindObjectImpl(const std::string& FullName, EClassCastFlags RequiredType)
@@ -1465,9 +1468,8 @@ static void EmitSDKCoreFiles(
         buf.append("#include \"CoreUObject_structs.hpp\"\n\n");
         buf.append("namespace SDK\n{{\n\n");
 
-        // Runtime-discovered ProcessEvent vtable index. Must precede any
-        // class definition so UObject's in-class ProcessEvent body can
-        // name-lookup it (complete-class context).
+        // Runtime-discovered ProcessEvent vtable index, consumed by
+        // UObject::ProcessEvent's body in CoreUObject_functions.cpp.
         buf.append("#ifdef AIOCORE_PROCESS_EVENT_INDEX\n");
         buf.append("constexpr int kProcessEventIndex = AIOCORE_PROCESS_EVENT_INDEX;\n");
         buf.append("#else\n");
