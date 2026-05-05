@@ -19,7 +19,7 @@ namespace InSDKUtils
 {
 	inline uintptr_t s_ImageBase = 0;
 
-	uintptr_t InSDKUtils::GetImageBase()
+	inline uintptr_t GetImageBase()
 	{
 		return s_ImageBase;
 	}
