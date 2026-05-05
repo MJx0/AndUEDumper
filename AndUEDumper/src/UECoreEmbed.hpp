@@ -1416,9 +1416,7 @@ static const char* kUECoreUnrealContainersH = R"UECoreUC(
 #include <string>
 #include <stdexcept>
 #include <iostream>
-#if defined(__GNUC__) || defined(__clang__)
 #include "utfcpp/unchecked.h"
-#endif
 
 namespace UC
 {	
@@ -1739,86 +1737,18 @@ namespace UC
 		template<typename T> friend Iterators::TArrayIterator<T> end  (const TArray& Array);
 	};
 
-#if defined(__GNUC__) || defined(__clang__)
-	class FString : public TArray<wchar_t>
+	class FString : public TArray<char16_t>
 	{
 	public:
 		FString() = default;
-		inline FString(const wchar_t *wstr)
-		{
-			MaxElements = NumElements = (wstr && *wstr) ? int32_t(std::wcslen(wstr)) + 1 : 0;
-			if (NumElements) Data = const_cast<wchar_t *>(wstr);
-		}
 
-		inline FString operator=(const wchar_t *&&other) { return FString(other); }
-
-		inline std::wstring ToWString() const { return IsValid() ? Data : L""; }
-
-		std::string ToString() const
-		{
+		inline std::string ToString() const {
 			if (!IsValid()) return "";
-
-			std::wstring wstr = ToWString();
-			if (wstr.empty()) return "";
-
 			std::string result;
-			utf8::unchecked::utf16to8(wstr.begin(), wstr.end(), std::back_inserter(result));
+			utf8::unchecked::utf16to8(Data, Data + NumElements - 1, std::back_inserter(result));
 			return result;
 		}
 	};
-#else
-	class FString : public TArray<wchar_t>
-	{
-	public:
-		friend std::ostream& operator<<(std::ostream& Stream, const UC::FString& Str) { return Stream << Str.ToString(); }
-
-	public:
-		using TArray::TArray;
-
-		FString(const wchar_t* Str)
-		{
-			const uint32 NullTerminatedLength = static_cast<uint32>(wcslen(Str) + 0x1);
-
-			Data = const_cast<wchar_t*>(Str);
-			NumElements = NullTerminatedLength;
-			MaxElements = NullTerminatedLength;
-		}
-
-	public:
-		inline std::string ToString() const
-		{
-			if (*this)
-			{
-				auto length = wcslen(Data);
-
-				std::string str(length, '\0');
-
-				std::use_facet<std::ctype<wchar_t>>(std::locale()).narrow(Data, Data + length, '?', &str[0]);
-
-				return str;
-				// return UtfN::Utf16StringToUtf8String<std::string>(Data, NumElements  - 1); // Exclude null-terminator
-			}
-
-			return "";
-		}
-
-		inline std::wstring ToWString() const
-		{
-			if (*this)
-				return std::wstring(Data);
-
-			return L"";
-		}
-
-	public:
-		inline       wchar_t* CStr()       { return Data; }
-		inline const wchar_t* CStr() const { return Data; }
-
-	public:
-		inline bool operator==(const FString& Other) const { return Other ? NumElements == Other.NumElements && wcscmp(Data, Other.Data) == 0 : false; }
-		inline bool operator!=(const FString& Other) const { return Other ? NumElements != Other.NumElements || wcscmp(Data, Other.Data) != 0 : true; }
-	};
-#endif
 	/*
 	* Class to allow construction of a TArray, that uses c-style standard-library memory allocation.
 	* 
@@ -1867,9 +1797,24 @@ namespace UC
 	public:
 		FAllocatedString(int32 Size)
 		{
-			Data = static_cast<wchar_t*>(malloc(Size * sizeof(wchar_t)));
+			Data = static_cast<char16_t*>(malloc(Size * sizeof(char16_t)));
 			NumElements = 0x0;
 			MaxElements = Size;
+		}
+
+		FAllocatedString(const char* str)
+		{
+			const size_t Utf8Len = (str && *str) ? std::strlen(str) : 0;
+			if (!Utf8Len)
+			{
+				Data = nullptr;
+				NumElements = MaxElements = 0;
+				return;
+			}
+			Data = static_cast<char16_t*>(malloc((Utf8Len + 1) * sizeof(char16_t)));
+			char16_t* End = utf8::unchecked::utf8to16(str, str + Utf8Len, Data);
+			*End = u'\0';
+			NumElements = MaxElements = int32(End - Data) + 1;
 		}
 
 		~FAllocatedString()
