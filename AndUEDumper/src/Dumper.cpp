@@ -507,7 +507,7 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
                 add(offs.UStruct.PropertiesSize,  4, "int32_t",         "PropertiesSize");
                 add(offs.UStruct.SuperStruct,     8, "struct UStruct*", "SuperStruct");
                 add(offs.UStruct.Children,        8, "struct UField*",  "Children");
-                add(offs.UStruct.ChildProperties, 8, "void*",           "ChildProperties");
+                add(offs.UStruct.ChildProperties, 8, "struct FField*",  "ChildProperties");
             }
             else if (cppName == "UEnum")
             {

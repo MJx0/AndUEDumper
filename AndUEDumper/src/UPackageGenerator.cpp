@@ -121,7 +121,8 @@ static const std::unordered_set<std::string> &kBuiltinIdents()
         "FName", "FString", "FText",
         "FScriptDelegate", "FDelegate", "FMulticastDelegate",
         "FMulticastInlineDelegate", "FMulticastSparseDelegate",
-        "FWeakObjectPtr", "FUniqueObjectGuid", "FFieldClass", "FProperty",
+        "FWeakObjectPtr", "FUniqueObjectGuid",
+        "FField", "FFieldClass", "FFieldVariant", "FProperty",
         "FScriptInterface", "FFieldPath",
         // Predefined container / wrapper templates
         "TArray", "TMap", "TSet", "TPair",
