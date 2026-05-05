@@ -652,10 +652,15 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
                 // the member declaration plus `EClassCastFlags{}` default
                 // arg both work standalone in SDK_A.
                 s.ExtraDecls =
-                    "\t// === AIO Core helpers (inline bodies at end of header) ===\n"
+                    "\t// === AIO Core helpers (out-of-line bodies in CoreUObject_functions.cpp) ===\n"
                     "\tstatic inline class TUObjectArrayWrapper GObjects;\n"
                     "\n"
-                    "\tvoid ProcessEvent(struct UFunction* Function, void* Parms) const;\n"
+                    "\tvoid ProcessEvent(struct UFunction* Function, void* Parms) const\n"
+                    "\t{\n"
+                    "\t    using FN = void(*)(const UObject*, struct UFunction*, void*);\n"
+                    "\t    auto vtbl = *reinterpret_cast<void* const* const*>(this);\n"
+                    "\t    reinterpret_cast<FN>(vtbl[kProcessEventIndex])(this, Function, Parms);\n"
+                    "\t}\n"
                     "\n"
                     "\tstd::string GetName() const;\n"
                     "\tstd::string GetFullName() const;\n"
@@ -1023,45 +1028,6 @@ void UEDumper::BuildProcessedPackages(UEPackagesArray &packages, const ProgressC
     }
 }
 
-
-// ============================================================================
-//  SDK CoreUObject_classes.hpp tail — minimal helper block.
-//
-//  AIOCore namespace + UObject::ProcessEvent inline body only. Other
-//  helpers (GetName / IsA / FindObject / ...) live out-of-line in
-//  CoreUObject_functions.cpp (UECore convention; user must compile and
-//  link that .cpp). StaticClassImpl<> / GetDefaultObjImpl<> templates
-//  are provided by embedded UECore Basic.h, not emitted here.
-// ============================================================================
-static void EmitSDKClassesHppHelpersTail(BufferFmt &buf, int processEventIndex)
-{
-    buf.append("\n// === AIO Core: ProcessEvent dispatch ===\n");
-    buf.append("// Other UObject helper bodies (GetName / IsA / FindObject / ...)\n");
-    buf.append("// live in CoreUObject_functions.cpp — link that .cpp into your TU.\n");
-    buf.append("// FName::s_NameResolver and UObject::GObjects.InitManually() must\n");
-    buf.append("// be wired from your bridge once at startup.\n\n");
-    buf.append("#ifndef AIOHeader_CORE_HELPERS_DEFINED\n");
-    buf.append("#define AIOHeader_CORE_HELPERS_DEFINED\n\n");
-
-    buf.append("namespace AIOCore\n{{\n");
-    buf.append("    #ifdef AIOCORE_PROCESS_EVENT_INDEX\n");
-    buf.append("    constexpr int kProcessEventIndex = AIOCORE_PROCESS_EVENT_INDEX;\n");
-    buf.append("    #else\n");
-    buf.append("    constexpr int kProcessEventIndex = {};\n", processEventIndex);
-    buf.append("    #endif\n");
-    buf.append("}}\n\n");
-
-    buf.append("{}", R"AIOPE(inline void UObject::ProcessEvent(struct UFunction* Function, void* Parms) const
-{
-    using FN = void(*)(const UObject*, struct UFunction*, void*);
-    auto vtbl = *reinterpret_cast<void* const* const*>(this);
-    reinterpret_cast<FN>(vtbl[AIOCore::kProcessEventIndex])(this, Function, Parms);
-}
-
-)AIOPE");
-
-    buf.append("#endif // AIOHeader_CORE_HELPERS_DEFINED\n");
-}
 
 // ============================================================================
 //  SDK CoreUObject_functions.cpp body — out-of-line UObject helpers.
@@ -1498,15 +1464,20 @@ static void EmitSDKCoreFiles(
         buf.append("#pragma once\n\n");
         buf.append("#include \"CoreUObject_structs.hpp\"\n\n");
         buf.append("namespace SDK\n{{\n\n");
+
+        // Runtime-discovered ProcessEvent vtable index. Must precede any
+        // class definition so UObject's in-class ProcessEvent body can
+        // name-lookup it (complete-class context).
+        buf.append("#ifdef AIOCORE_PROCESS_EVENT_INDEX\n");
+        buf.append("constexpr int kProcessEventIndex = AIOCORE_PROCESS_EVENT_INDEX;\n");
+        buf.append("#else\n");
+        buf.append("constexpr int kProcessEventIndex = {};\n", processEventIndex);
+        buf.append("#endif\n\n");
+
         buf.append("// Package: CoreUObject - Classes({})\n\n", corePkg.Classes.size());
 
         if (!corePkg.Classes.empty())
             UE_UPackage::AppendStructsToBuffer(const_cast<std::vector<UE_UPackage::Struct>&>(corePkg.Classes), &buf);
-
-        // AIOCore namespace + ProcessEvent inline body. Other helper bodies
-        // (GetName / IsA / FindObject / ...) are out-of-line in
-        // CoreUObject_functions.cpp (UECore convention).
-        EmitSDKClassesHppHelpersTail(buf, processEventIndex);
 
         buf.append("\n}} // namespace SDK\n");
     }

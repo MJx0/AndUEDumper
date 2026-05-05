@@ -22,11 +22,6 @@ namespace SDK {
 
 using namespace UC;
 
-namespace Offsets
-{
-	constexpr int32 ProcessEventIdx = 0x00000045;
-}
-
 namespace InSDKUtils
 {
 	inline uintptr_t s_ImageBase = 0;
