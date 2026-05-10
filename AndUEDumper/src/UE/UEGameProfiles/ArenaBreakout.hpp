@@ -43,6 +43,7 @@ public:
     uintptr_t GetGUObjectArrayPtr() const override
     {
         std::vector<std::pair<std::string, int>> idaPatterns = {
+            {"? ? ? 90 ? ? ? 52 09 01 09 0B ? ? ? 71 ? ? ? F9 ? ? ? 1A ? ? ? 13 ? ? ? 12 08 01 09 4B ? ? ? 52 ? ? ? F9 ? ? ? F8 1F 20 03 D5 08 29 29 9B ? ? ? 39 ? ? ? 37 F8 03 00 AA", 0},
             {"91 E1 03 ? AA E0 03 08 AA E2 03 1F 2A", -7},
             {"B4 21 0C 40 B9 ? ? ? ? ? ? ? 91", 5},
             {"9F E5 00 ? 00 E3 FF ? 40 E3 ? ? A0 E1", -2},
@@ -67,36 +68,16 @@ public:
 
     uintptr_t GetNamesPtr() const override
     {
-        std::string pattern = "F4 4F 01 A9 FD 7B 02 A9 FD 83 00 91 ? ? ? ? A8 02 ? 39";
+        std::string pattern = "38 1D 08 8B F7 03 01 AA ? ? ? F9 ? ? ? 91 ? ? ? 91 ? ? ? D3";
 
         PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
 
-        uintptr_t find = findIdaPattern(map_type, pattern, 0);
+        uintptr_t find = findIdaPattern(map_type, pattern, -12);
+
         if (find != 0)
         {
-            bool skippedFirst = false;
-            intptr_t adrp_adr = 0;
-            for (int i = 0; i < 8; i++)
-            {
-                uint32_t insn = vm_rpm_ptr<uint32_t>((void*)(find + (i * 4)));
-                if (KittyArm64::decodeInsnType(insn) != EKittyInsnTypeArm64::ADRP)
-                    continue;
-
-                if (!skippedFirst)
-                {
-                    skippedFirst = true;
-                    continue;
-                }
-
-                adrp_adr = find + (i * 4);
-                break;
-            }
-
-            if (adrp_adr != 0)
-            {
-                // 0 so the it scans for next imm instruction offset
-                return Arm64::DecodeADRL(adrp_adr, 0);
-            }
+            uintptr_t result = Arm64::DecodeADRL(find, 0);
+            return result;
         }
 
         return 0;
@@ -112,19 +93,19 @@ public:
             once = true;
             offsets.FNamePool.BlocksOff += sizeof(void *);
 
-            // https://github.com/MJx0/AndUEDumper/issues/42
-            offsets.UStruct.SuperStruct += sizeof(void *);
-            offsets.UStruct.Children += sizeof(void *);
-            offsets.UStruct.ChildProperties += sizeof(void *);
-            offsets.UStruct.PropertiesSize += sizeof(void *);
-
-            offsets.UField.Next += sizeof(void *);
-            offsets.UEnum.Names += sizeof(void *);
-
-            offsets.UFunction.EFunctionFlags += sizeof(void *);
-            offsets.UFunction.NumParams += sizeof(void *);
-            offsets.UFunction.ParamSize += sizeof(void *);
-            offsets.UFunction.Func += sizeof(void *);
+            offsets.UObject.ClassPrivate = 0x10;
+            offsets.UObject.NamePrivate = 0x18;
+            offsets.UObject.OuterPrivate = 0x20;
+            offsets.UStruct.SuperStruct = 0x40;
+            offsets.UStruct.Children = 0x48;
+            offsets.UStruct.ChildProperties = 0x50;
+            offsets.UStruct.PropertiesSize = 0x58;
+            offsets.FField.Next = 0x20;
+            offsets.FField.NamePrivate = 0x28;
+            offsets.FField.FlagsPrivate = 0x40;
+            offsets.FProperty.Offset_Internal = 0x4C;
+            offsets.UFunction.Func = 0xD8;
+            offsets.UEnum.Names = 0x40;
         }
 
         return &offsets;
